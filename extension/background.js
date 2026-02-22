@@ -124,10 +124,20 @@ async function checkServerHealth() {
     const response = await fetch(`${SERVER_URL}/health`, {
       method: 'GET',
       signal: AbortSignal.timeout(5000), // 5 second timeout
+      mode: 'cors', // Explicitly set CORS mode
     });
     return response.ok;
   } catch (error) {
-    console.error('[Background] Server health check failed:', error);
+    // Server not running is expected - don't log network errors
+    // Only log unexpected errors (not "Failed to fetch" which means server is down)
+    const isNetworkError = error.name === 'TypeError' && error.message.includes('Failed to fetch');
+    const isTimeoutError = error.name === 'AbortError' || error.name === 'TimeoutError';
+    
+    if (!isNetworkError && !isTimeoutError) {
+      // Only log unexpected errors (not server down scenarios)
+      console.warn('[Background] Server health check unexpected error:', error.message);
+    }
+    // Return false for all errors (server unreachable)
     return false;
   }
 }

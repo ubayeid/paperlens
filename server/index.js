@@ -55,8 +55,27 @@ app.listen(PORT, () => {
   if (!process.env.NAPKIN_TOKEN) {
     console.warn('[Server] WARNING: NAPKIN_TOKEN not set');
   }
-  if (!process.env.OPENAI_API_KEY) {
-    console.warn('[Server] WARNING: OPENAI_API_KEY not set');
+  const useOpenAI = process.env.USE_OPENAI === 'true';
+  const hasOpenAI = process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'your_openai_api_key_here';
+  const hasGemini = process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'your_gemini_api_key_here';
+  
+  if (!hasOpenAI && !hasGemini) {
+    console.warn('[Server] WARNING: Neither OPENAI_API_KEY nor GEMINI_API_KEY is set');
+    console.warn('[Server] Set at least one AI API key in .env file');
+  } else {
+    if (useOpenAI) {
+      if (hasOpenAI) {
+        console.log('[Server] USE_OPENAI=true → Using OpenAI API');
+      } else {
+        console.warn('[Server] USE_OPENAI=true but OPENAI_API_KEY not set, will fall back to Gemini');
+      }
+    } else {
+      if (hasGemini) {
+        console.log('[Server] USE_OPENAI=false → Using Gemini API');
+      } else if (hasOpenAI) {
+        console.log('[Server] USE_OPENAI not set, auto-detected OpenAI API');
+      }
+    }
   }
 });
 

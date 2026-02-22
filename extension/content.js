@@ -452,7 +452,10 @@ function showSidebar(mode, options = {}) {
           <span class="paperlens-logo">✦ PaperLens</span>
           <span class="paperlens-mode-badge">Manual</span>
         </div>
-        <button class="paperlens-close-btn" id="paperlens-close">×</button>
+        <div class="paperlens-header-buttons">
+          <button class="paperlens-collapse-btn" id="paperlens-collapse" title="Collapse sidebar">◀</button>
+          <button class="paperlens-close-btn" id="paperlens-close" title="Close sidebar">×</button>
+        </div>
       </div>
       <div class="paperlens-sidebar-content">
         ${selectedTextSection}
@@ -466,7 +469,10 @@ function showSidebar(mode, options = {}) {
           <span class="paperlens-logo">✦ PaperLens</span>
           <span class="paperlens-mode-badge">Agentic</span>
         </div>
-        <button class="paperlens-close-btn" id="paperlens-close">×</button>
+        <div class="paperlens-header-buttons">
+          <button class="paperlens-collapse-btn" id="paperlens-collapse" title="Collapse sidebar">◀</button>
+          <button class="paperlens-close-btn" id="paperlens-close" title="Close sidebar">×</button>
+        </div>
       </div>
       <div class="paperlens-sidebar-content">
         <div class="paperlens-paper-title" id="paperlens-paper-title">Loading...</div>
@@ -504,21 +510,108 @@ function showSidebar(mode, options = {}) {
     }
   });
 
-  // Shrink main content by adjusting body width
+  // Shrink main content by adjusting body margin-right (more reliable than width)
   const sidebarWidth = parseInt(getComputedStyle(sidebar).width) || 420;
+  sidebar._lastWidth = sidebarWidth; // Store initial width
   
-  // Use CSS to shrink content
-  document.body.style.width = `calc(100% - ${sidebarWidth}px)`;
-  document.body.style.transition = 'width 300ms ease-out';
+  // Use margin-right approach which works better across different website layouts
+  // This pushes content to the left without breaking layouts
+  const originalBodyMarginRight = document.body.style.marginRight || '';
+  const originalBodyWidth = document.body.style.width || '';
+  const originalBodyOverflowX = document.body.style.overflowX || '';
+  
+  document.body.style.marginRight = `${sidebarWidth}px`;
+  document.body.style.transition = 'margin-right 300ms ease-out';
   document.body.style.overflowX = 'hidden';
+  
+  // Store original values for cleanup
+  sidebar._originalBodyMarginRight = originalBodyMarginRight;
+  sidebar._originalBodyWidth = originalBodyWidth;
+  sidebar._originalBodyOverflowX = originalBodyOverflowX;
+  
+  // Also try to adjust main content containers (common patterns)
+  // Include more specific selectors for different websites
+  const mainContainers = [
+    document.querySelector('main'),
+    document.querySelector('#main'),
+    document.querySelector('.main'),
+    document.querySelector('[role="main"]'),
+    document.querySelector('article'),
+    document.querySelector('.content'),
+    document.querySelector('#content'),
+    // ChatGPT and similar SPA patterns
+    document.querySelector('[data-testid*="conversation"]'),
+    document.querySelector('[class*="conversation"]'),
+    document.querySelector('[class*="chat"]'),
+    // Common wrapper patterns
+    document.querySelector('.app'),
+    document.querySelector('#app'),
+    document.querySelector('.container'),
+    document.querySelector('#container'),
+    document.querySelector('.wrapper'),
+    document.querySelector('#wrapper'),
+    // Find the main scrollable container
+    document.querySelector('[style*="overflow"]'),
+  ].filter((el, index, self) => el !== null && self.indexOf(el) === index); // Remove duplicates
+  
+  mainContainers.forEach(container => {
+    // Skip if container is too small (likely not the main content)
+    const rect = container.getBoundingClientRect();
+    if (rect.width < 200 || rect.height < 200) return;
+    
+    const originalMarginRight = container.style.marginRight || '';
+    container.style.marginRight = `${sidebarWidth}px`;
+    container.style.transition = 'margin-right 300ms ease-out';
+    if (!container._originalMarginRight) {
+      container._originalMarginRight = originalMarginRight;
+    }
+  });
+  
+  sidebar._adjustedContainers = mainContainers;
+  
+  // Also try to find and adjust the viewport/root element
+  // Some SPAs use a root div that needs adjustment
+  const rootElements = [
+    document.documentElement,
+    document.querySelector('html'),
+  ];
+  
+  rootElements.forEach(root => {
+    if (root && root !== document.body) {
+      const originalMarginRight = root.style.marginRight || '';
+      root.style.marginRight = `${sidebarWidth}px`;
+      root.style.transition = 'margin-right 300ms ease-out';
+      if (!root._originalMarginRight) {
+        root._originalMarginRight = originalMarginRight;
+      }
+    }
+  });
+  
+  sidebar._adjustedRootElements = rootElements.filter(el => el && el !== document.body);
   
   // Listen for sidebar resize
   try {
     const resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const newWidth = entry.contentRect.width;
+        // Don't update if collapsed (it's intentionally small)
+        if (sidebar._isCollapsed) continue;
+        
+        sidebar._lastWidth = newWidth; // Store for restore
         if (document.body) {
-          document.body.style.width = `calc(100% - ${newWidth}px)`;
+          document.body.style.marginRight = `${newWidth}px`;
+        }
+        // Update main containers too
+        if (sidebar._adjustedContainers) {
+          sidebar._adjustedContainers.forEach(container => {
+            container.style.marginRight = `${newWidth}px`;
+          });
+        }
+        // Update root elements too
+        if (sidebar._adjustedRootElements) {
+          sidebar._adjustedRootElements.forEach(root => {
+            root.style.marginRight = `${newWidth}px`;
+          });
         }
       }
     });
@@ -541,6 +634,25 @@ function showSidebar(mode, options = {}) {
   if (closeBtn) {
     closeBtn.onclick = closeSidebar;
   }
+
+  // Collapse/Expand button handler
+  const collapseBtn = sidebar.querySelector('#paperlens-collapse');
+  if (collapseBtn) {
+    collapseBtn.onclick = (e) => {
+      e.stopPropagation();
+      toggleSidebarCollapse();
+    };
+  }
+
+  // Initialize collapsed state
+  sidebar._isCollapsed = false;
+  
+  // When collapsed, clicking anywhere on sidebar expands it
+  sidebar.addEventListener('click', (e) => {
+    if (sidebar._isCollapsed && !e.target.closest('.paperlens-close-btn')) {
+      toggleSidebarCollapse();
+    }
+  });
 
   // Add resize handle (only if sidebar was successfully created)
   if (sidebar && sidebar.appendChild) {
@@ -597,13 +709,29 @@ function addResizeHandle(sidebarElement) {
   const handleMouseMove = (e) => {
     if (!isResizing || !sidebarElement) return;
     
+    // Don't resize if collapsed
+    if (sidebarElement._isCollapsed) return;
+    
     const diff = startX - e.clientX; // Inverted because sidebar is on right
     const newWidth = Math.max(300, Math.min(800, startWidth + diff));
     sidebarElement.style.width = `${newWidth}px`;
+    sidebarElement._lastWidth = newWidth; // Store for restore after collapse
     
-    // Update body width if body exists
+    // Update body margin-right if body exists
     if (document.body) {
-      document.body.style.width = `calc(100% - ${newWidth}px)`;
+      document.body.style.marginRight = `${newWidth}px`;
+    }
+    // Update main containers too
+    if (sidebarElement._adjustedContainers) {
+      sidebarElement._adjustedContainers.forEach(container => {
+        container.style.marginRight = `${newWidth}px`;
+      });
+    }
+    // Update root elements too
+    if (sidebarElement._adjustedRootElements) {
+      sidebarElement._adjustedRootElements.forEach(root => {
+        root.style.marginRight = `${newWidth}px`;
+      });
     }
   };
 
@@ -634,6 +762,62 @@ function addResizeHandle(sidebarElement) {
 }
 
 /**
+ * Toggle sidebar collapse/expand
+ */
+function toggleSidebarCollapse() {
+  if (!sidebar) return;
+  
+  sidebar._isCollapsed = !sidebar._isCollapsed;
+  const collapseBtn = sidebar.querySelector('#paperlens-collapse');
+  
+  if (sidebar._isCollapsed) {
+    // Collapse: minimize to thin strip
+    sidebar.classList.add('paperlens-collapsed');
+    sidebar.style.width = '40px';
+    sidebar.style.minWidth = '40px';
+    if (collapseBtn) {
+      collapseBtn.innerHTML = '▶';
+      collapseBtn.title = 'Expand sidebar';
+    }
+    
+    // Update body margin
+    if (document.body) {
+      document.body.style.marginRight = '40px';
+    }
+    if (sidebar._adjustedContainers) {
+      sidebar._adjustedContainers.forEach(container => {
+        container.style.marginRight = '40px';
+      });
+    }
+  } else {
+    // Expand: restore to previous width or default
+    sidebar.classList.remove('paperlens-collapsed');
+    const restoredWidth = sidebar._lastWidth || 420;
+    sidebar.style.width = `${restoredWidth}px`;
+    sidebar.style.minWidth = '300px'; // Restore min-width
+    if (collapseBtn) {
+      collapseBtn.innerHTML = '◀';
+      collapseBtn.title = 'Collapse sidebar';
+    }
+    
+    // Update body margin
+    if (document.body) {
+      document.body.style.marginRight = `${restoredWidth}px`;
+    }
+    if (sidebar._adjustedContainers) {
+      sidebar._adjustedContainers.forEach(container => {
+        container.style.marginRight = `${restoredWidth}px`;
+      });
+    }
+    if (sidebar._adjustedRootElements) {
+      sidebar._adjustedRootElements.forEach(root => {
+        root.style.marginRight = `${restoredWidth}px`;
+      });
+    }
+  }
+}
+
+/**
  * Close sidebar
  */
 function closeSidebar() {
@@ -642,14 +826,36 @@ function closeSidebar() {
     isSidebarOpen = false;
     currentMode = null;
     if (document.body) {
-      document.body.style.width = '100%';
+      document.body.style.marginRight = '';
+      document.body.style.width = '';
+      document.body.style.overflowX = '';
     }
     return;
   }
 
   sidebar.style.transform = 'translateX(420px)';
+  
+  // Restore body styles
   if (document.body) {
-    document.body.style.width = '100%';
+    document.body.style.marginRight = sidebar._originalBodyMarginRight || '';
+    document.body.style.width = sidebar._originalBodyWidth || '';
+    document.body.style.overflowX = sidebar._originalBodyOverflowX || '';
+  }
+  
+  // Restore main container styles
+  if (sidebar._adjustedContainers) {
+    sidebar._adjustedContainers.forEach(container => {
+      container.style.marginRight = container._originalMarginRight || '';
+      container.style.transition = '';
+    });
+  }
+  
+  // Restore root element styles
+  if (sidebar._adjustedRootElements) {
+    sidebar._adjustedRootElements.forEach(root => {
+      root.style.marginRight = root._originalMarginRight || '';
+      root.style.transition = '';
+    });
   }
 
   setTimeout(() => {

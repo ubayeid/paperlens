@@ -3,11 +3,7 @@
  * Per-section decisions before sending to Napkin
  */
 
-const OpenAI = require('openai');
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const { generateChatCompletion } = require('../ai/client');
 
 /**
  * Process section text before sending to Napkin
@@ -79,27 +75,15 @@ async function processSection(section) {
  * @returns {Promise<string>} Summarized text (key points)
  */
 async function summarizeText(text) {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error('OPENAI_API_KEY not configured');
-  }
-
-  const response = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages: [
-      {
-        role: 'system',
-        content: 'You are a research paper analyzer. Summarize the following text into key points suitable for diagram generation. Keep it concise but informative. Maximum 1800 characters.',
-      },
-      {
-        role: 'user',
-        content: text,
-      },
-    ],
-    max_tokens: 500,
-    temperature: 0.3,
-  });
-
-  return response.choices[0].message.content.trim();
+  const systemPrompt = 'You are a research paper analyzer. Summarize the following text into key points suitable for diagram generation. Keep it concise but informative. Maximum 1800 characters.';
+  
+  return await generateChatCompletion(
+    systemPrompt,
+    text,
+    {
+      temperature: 0.3,
+    }
+  );
 }
 
 /**

@@ -1,14 +1,10 @@
 /**
  * Segmenter
- * Uses OpenAI to intelligently segment text content into meaningful visualizable parts
+ * Uses AI (OpenAI or Gemini) to intelligently segment text content into meaningful visualizable parts
  * Works for both full papers and partial selections
  */
 
-const OpenAI = require('openai');
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const { generateChatCompletion } = require('../ai/client');
 
 const SEGMENTER_PROMPT = `You are PaperLens Segmenter. Your job is to analyze text content (which may be a full paper, a section, or a partial selection) and intelligently break it down into meaningful segments that would benefit from visualization.
 
@@ -69,9 +65,7 @@ Be intelligent and selective. Quality over quantity.`;
  * @returns {Promise<Array>} Array of segments with titles and text
  */
 async function segmentContent(text, context = '') {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error('OPENAI_API_KEY not configured');
-  }
+  // AI client will throw error if no API key is configured
 
   if (!text || text.trim().length === 0) {
     throw new Error('Text content cannot be empty');
@@ -100,24 +94,16 @@ CRITICAL INSTRUCTIONS:
 9. **IMPORTANT**: Each segment's "text" field must contain ONLY text from the input above, nothing else`;
 
   try {
-    const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        {
-          role: 'system',
-          content: SEGMENTER_PROMPT,
-        },
-        {
-          role: 'user',
-          content: userMessage,
-        },
-      ],
-      response_format: { type: 'json_object' },
-      temperature: 0.3,
-    });
-
-    const content = response.choices[0].message.content.trim();
-    console.log('[Segmenter] Raw GPT response:', content.substring(0, 500));
+    const content = await generateChatCompletion(
+      SEGMENTER_PROMPT,
+      userMessage,
+      {
+        temperature: 0.3,
+        responseFormat: 'json_object',
+      }
+    );
+    
+    console.log('[Segmenter] Raw AI response:', content.substring(0, 500));
     
     const parsed = JSON.parse(content);
 

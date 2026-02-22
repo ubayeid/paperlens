@@ -1,13 +1,9 @@
 /**
  * Planner
- * Uses GPT-4o-mini to analyze paper structure and create visualization plan
+ * Uses AI (OpenAI or Gemini) to analyze paper structure and create visualization plan
  */
 
-const OpenAI = require('openai');
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const { generateChatCompletion } = require('../ai/client');
 
 const PLANNER_PROMPT = `You are PaperLens Planner. Your job is to intelligently identify which sections of a document would benefit MOST from visualization.
 
@@ -82,9 +78,7 @@ Be EXTREMELY selective. Only visualize sections where a diagram would genuinely 
  * @returns {Promise<Array>} Plan array with section decisions
  */
 async function createPlan(paperData) {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error('OPENAI_API_KEY not configured');
-  }
+  // AI client will throw error if no API key is configured
 
   // Build context for planner with section IDs and metadata
   const sectionsText = paperData.sections.map((s, i) => {
@@ -106,24 +100,16 @@ async function createPlan(paperData) {
 6. Be VERY selective - maximum 5-6 visualizations, only for sections that truly benefit from diagrams.`;
 
   try {
-    const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        {
-          role: 'system',
-          content: PLANNER_PROMPT,
-        },
-        {
-          role: 'user',
-          content: userMessage,
-        },
-      ],
-      response_format: { type: 'json_object' },
-      temperature: 0.3,
-    });
-
-    const content = response.choices[0].message.content.trim();
-    console.log('[Planner] Raw GPT response:', content.substring(0, 500));
+    const content = await generateChatCompletion(
+      PLANNER_PROMPT,
+      userMessage,
+      {
+        temperature: 0.3,
+        responseFormat: 'json_object',
+      }
+    );
+    
+    console.log('[Planner] Raw AI response:', content.substring(0, 500));
     
     const parsed = JSON.parse(content);
 

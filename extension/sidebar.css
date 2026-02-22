@@ -38,6 +38,35 @@
   -ms-user-select: none;
 }
 
+/* Collapsed state */
+#paperlens-sidebar.paperlens-collapsed {
+  min-width: 40px;
+  width: 40px !important;
+}
+
+#paperlens-sidebar.paperlens-collapsed .paperlens-sidebar-content {
+  display: none;
+}
+
+#paperlens-sidebar.paperlens-collapsed .paperlens-logo,
+#paperlens-sidebar.paperlens-collapsed .paperlens-mode-badge {
+  display: none;
+}
+
+#paperlens-sidebar.paperlens-collapsed .paperlens-sidebar-header {
+  padding: 16px 8px;
+  justify-content: center;
+}
+
+#paperlens-sidebar.paperlens-collapsed .paperlens-header-buttons {
+  flex-direction: column;
+  gap: 12px;
+}
+
+#paperlens-sidebar.paperlens-collapsed .paperlens-resize-handle {
+  display: none;
+}
+
 /* Allow selection only for specific interactive elements */
 #paperlens-sidebar .paperlens-section-heading,
 #paperlens-sidebar .paperlens-paper-title,
@@ -128,6 +157,12 @@
   flex-shrink: 0; /* Prevent header from shrinking */
 }
 
+.paperlens-header-buttons {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 .paperlens-logo {
   font-size: 18px;
   font-weight: 600;
@@ -146,11 +181,12 @@
   text-transform: uppercase;
 }
 
+.paperlens-collapse-btn,
 .paperlens-close-btn {
   background: none;
   border: none;
   color: var(--text-secondary);
-  font-size: 24px;
+  font-size: 20px;
   cursor: pointer;
   padding: 0;
   width: 24px;
@@ -160,11 +196,17 @@
   justify-content: center;
   border-radius: 4px;
   transition: all 0.2s;
+  line-height: 1;
 }
 
+.paperlens-collapse-btn:hover,
 .paperlens-close-btn:hover {
   background: var(--border);
   color: var(--text);
+}
+
+.paperlens-collapse-btn {
+  font-size: 16px;
 }
 
 .paperlens-sidebar-content {
