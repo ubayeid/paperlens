@@ -47,7 +47,7 @@ app.use((err, req, res, next) => {
 });
 
 // Start server
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`[Server] PaperLens API running on port ${PORT}`);
   console.log(`[Server] Health check: http://localhost:${PORT}/health`);
   
@@ -86,6 +86,20 @@ app.listen(PORT, () => {
     } catch (error) {
       console.warn('[Server] Could not determine AI model:', error.message);
     }
+  }
+});
+
+// Handle server errors
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`[Server] ERROR: Port ${PORT} is already in use`);
+    console.error(`[Server] Another process is using port ${PORT}. Please:`);
+    console.error(`[Server] 1. Stop the other process, or`);
+    console.error(`[Server] 2. Set a different PORT in your .env file`);
+    process.exit(1);
+  } else {
+    console.error('[Server] Error:', err);
+    process.exit(1);
   }
 });
 

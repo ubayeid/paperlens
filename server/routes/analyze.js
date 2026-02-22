@@ -1,6 +1,7 @@
 /**
  * Analyze Route
  * Agentic endpoint with Server-Sent Events (SSE) streaming
+ * v2.1 - Compatible with new planner returning .sections instead of .plan
  */
 
 const express = require('express');
@@ -9,115 +10,87 @@ const { execute } = require('../agent/executor');
 
 const router = express.Router();
 
-/**
- * POST /analyze
- * Analyze paper and stream results via SSE
- */
 router.post('/', async (req, res) => {
-  // Set SSE headers
+  // SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  const send = (obj) => {
+    res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  };
 
   const { paperData } = req.body;
 
   if (!paperData || !paperData.sections) {
-    res.write(`data: ${JSON.stringify({ type: 'error', message: 'Invalid paper data' })}\n\n`);
+    send({ type: 'error', message: 'Invalid paper data' });
     res.end();
     return;
   }
 
   try {
-    // Step 1: Create plan
-    console.log('[Analyze Route] Creating plan...');
+    // ── Step 1: Create plan ─────────────────────────────────────────────────
+    console.log('[Analyze] Creating plan...');
     let planResult;
     try {
       planResult = await createPlan(paperData);
     } catch (error) {
-      // Handle Gemini quota errors specifically
       if (error.message && (error.message.includes('quota') || error.message.includes('429'))) {
-        res.write(`data: ${JSON.stringify({
-          type: 'error',
-          message: 'Gemini API quota exceeded. Free tier limit: 20 requests/day. Please wait or switch to OpenAI by setting USE_OPENAI=true in .env'
-        })}\n\n`);
+        send({ type: 'error', message: 'AI API quota exceeded. Please wait or check your API key.' });
         res.end();
         return;
       }
       throw error;
     }
 
-    // Check if content is visualizable
-    if (!planResult.hasVisualizableContent) {
-      // Send "no content" event with reason
-      res.write(`data: ${JSON.stringify({ 
-        type: 'no_content', 
-        reason: planResult.reason || 'No visualizable content found on this page'
-      })}\n\n`);
-      res.write(`data: ${JSON.stringify({ type: 'complete' })}\n\n`);
-      res.end();
-      console.log('[Analyze Route] No visualizable content:', planResult.reason);
-      return;
-    }
-
-    const plan = planResult.plan || [];
-    
-    // Send plan immediately (with hasVisualizableContent and reason)
-    res.write(`data: ${JSON.stringify({ 
-      type: 'plan', 
-      data: plan,
+    console.log('[Analyze] Plan result:', {
       hasVisualizableContent: planResult.hasVisualizableContent,
-      reason: planResult.reason
-    })}\n\n`);
+      reason: planResult.reason,
+      sectionCount: (planResult.sections || planResult.plan || []).length,
+    });
 
-    // Step 2: Execute plan and stream results
-    console.log('[Analyze Route] Executing plan...');
-    let completedCount = 0;
-    const totalSections = plan.filter(p => !p.skip).length;
+    // Support both new planner (.sections) and old planner (.plan)
+    const plan = planResult.sections || planResult.plan || [];
 
-    if (totalSections === 0) {
-      // No sections to visualize
-      res.write(`data: ${JSON.stringify({ 
-        type: 'no_content', 
-        reason: planResult.reason || 'No sections selected for visualization'
-      })}\n\n`);
-      res.write(`data: ${JSON.stringify({ type: 'complete' })}\n\n`);
+    if (!planResult.hasVisualizableContent || plan.length === 0) {
+      send({ type: 'no_content', reason: planResult.reason || 'No visualizable content found.' });
+      send({ type: 'complete' });
       res.end();
       return;
     }
+
+    // Send plan to front end so it can render skeleton cards immediately
+    send({
+      type: 'plan',
+      data: plan,
+      hasVisualizableContent: true,
+      reason: planResult.reason,
+    });
+
+    // ── Step 2: Execute ─────────────────────────────────────────────────────
+    const totalSections = plan.filter(p => !p.skip).length;
+    console.log(`[Analyze] Executing plan: ${totalSections} sections`);
+
+    let completedCount = 0;
 
     await execute(plan, paperData, (sectionId, svg, heading, error) => {
       if (error) {
-        // Send error event
-        res.write(`data: ${JSON.stringify({
-          type: 'section_error',
-          sectionId,
-          heading: heading || sectionId,
-          message: error,
-        })}\n\n`);
+        send({ type: 'section_error', sectionId, heading: heading || sectionId, message: error });
       } else if (svg) {
-        // Send diagram event
-        res.write(`data: ${JSON.stringify({
-          type: 'diagram',
-          sectionId,
-          svg,
-          heading: heading || sectionId,
-        })}\n\n`);
+        send({ type: 'diagram', sectionId, svg, heading: heading || sectionId });
         completedCount++;
       }
     });
 
-    // Step 3: Send completion event
-    res.write(`data: ${JSON.stringify({ type: 'complete' })}\n\n`);
+    // ── Step 3: Complete ────────────────────────────────────────────────────
+    send({ type: 'complete' });
     res.end();
+    console.log(`[Analyze] Done: ${completedCount}/${totalSections} visuals generated`);
 
-    console.log(`[Analyze Route] Completed: ${completedCount}/${totalSections} sections visualized`);
   } catch (error) {
-    console.error('[Analyze Route] Error:', error);
-    res.write(`data: ${JSON.stringify({
-      type: 'error',
-      message: error.message || 'Internal server error',
-    })}\n\n`);
+    console.error('[Analyze] Error:', error);
+    send({ type: 'error', message: error.message || 'Internal server error' });
     res.end();
   }
 });

@@ -1,17 +1,16 @@
 /**
  * Page Scraper
  * Extracts structured content from ANY webpage
- * Generic approach - no domain-specific logic
+ * v2.1 - Better ChatGPT/conversational page support
  */
 
 /**
  * Helper: Detect navigation/footer elements to skip
  */
 function isNavigationElement(el) {
-  const tag = el.tagName.toLowerCase();
   const parent = el.closest(
     'nav, header, footer, [class*="nav"], [class*="menu"], ' +
-    '[class*="footer"], [class*="sidebar"], [class*="cookie"], ' +
+    '[class*="footer"], [class*="cookie"], ' +
     '[class*="banner"], [id*="nav"], [id*="footer"], ' +
     '[role="navigation"], [role="banner"], [role="contentinfo"]'
   );
@@ -22,30 +21,98 @@ function isNavigationElement(el) {
  * Helper: Infer a heading label for heading-less chunks
  */
 function inferHeading(text) {
-  // Use first meaningful sentence as heading
-  const sentences = text.split(/[.!?]/).filter(s => s.trim().length > 10);
+  const sentences = text.split(/[.!?\n]/).filter(s => s.trim().length > 10);
   if (sentences.length > 0) {
     const firstSentence = sentences[0].trim();
-    return firstSentence.slice(0, 60) + (firstSentence.length > 60 ? '...' : '');
+    return firstSentence.slice(0, 60) + (firstSentence.length > 60 ? '…' : '');
   }
   return 'Content';
 }
 
 /**
+ * Extract ChatGPT conversation structure
+ * Returns well-structured sections from AI assistant messages
+ */
+function extractChatGPTStructure(url) {
+  const sections = [];
+
+  // ChatGPT message containers
+  const messageSelectors = [
+    '[data-message-author-role="assistant"]',
+    '[class*="assistant"]',
+    '.markdown',
+    '[class*="markdown"]',
+    '[class*="prose"]',
+    // Fallback: any substantial content block
+    'div[class*="content"]',
+  ];
+
+  let messages = [];
+  for (const sel of messageSelectors) {
+    const found = Array.from(document.querySelectorAll(sel));
+    if (found.length > 0) {
+      messages = found;
+      break;
+    }
+  }
+
+  // If no specific assistant messages found, get all message-like blocks
+  if (messages.length === 0) {
+    // Try generic article/main content
+    const mainContent = document.querySelector('main, article, [role="main"]');
+    if (mainContent) {
+      // Split by horizontal rules or large blocks
+      const blocks = Array.from(mainContent.children).filter(el => {
+        const text = el.innerText?.trim() || '';
+        return text.length > 100;
+      });
+      messages = blocks;
+    }
+  }
+
+  messages.forEach((el, i) => {
+    // Skip user messages (short, question-like)
+    const text = el.innerText?.trim() || '';
+    if (!text || text.length < 80) return;
+    if (isNavigationElement(el)) return;
+
+    const wordCount = text.split(/\s+/).filter(w => w.length > 0).length;
+    if (wordCount < 30) return;
+
+    // Check for structural indicators to infer heading
+    const firstLine = text.split('\n')[0].trim();
+    const heading = firstLine.length > 5 && firstLine.length < 120
+      ? firstLine.slice(0, 80)
+      : inferHeading(text);
+
+    sections.push({
+      id: `msg-${i}`,
+      heading,
+      text: text.slice(0, 3000),
+      wordCount,
+      hasCode: !!el.querySelector('pre, code'),
+      hasTable: !!el.querySelector('table'),
+      hasFigure: !!el.querySelector('figure, img'),
+      figureCaption: el.querySelector('figcaption')?.innerText || null,
+    });
+  });
+
+  return sections;
+}
+
+/**
  * Extract page structure from current page
- * Works on ANY webpage - no domain restrictions
- * @returns {object} Page data with title, sections, etc.
  */
 function extractPaperStructure() {
   const url = window.location.href;
-  
-  // Detect PDF - Chrome's PDF viewer or direct PDF URLs
-  const isChromePDF = window.location.protocol === 'chrome-extension:' && 
-                      window.location.hostname.includes('mhjfbmdgcfjbbpaeojofohoefgiehjai');
+
+  // Detect PDF
+  const isChromePDF = window.location.protocol === 'chrome-extension:' &&
+    window.location.hostname.includes('mhjfbmdgcfjbbpaeojofohoefgiehjai');
   const isPDFURL = url.endsWith('.pdf') || url.includes('.pdf#') || url.includes('.pdf?');
   const isPDFContentType = document.contentType === 'application/pdf';
   const pdfEmbed = document.querySelector('embed[type="application/pdf"], object[type="application/pdf"]');
-  
+
   if (isChromePDF || isPDFURL || isPDFContentType || pdfEmbed) {
     return {
       title: document.title || 'PDF Document',
@@ -62,44 +129,46 @@ function extractPaperStructure() {
   if (!titleElement) {
     titleElement = document.querySelector('#content h1, main h1, article h1');
   }
-  const title = titleElement ? titleElement.innerText.trim() : document.title || window.location.hostname;
+  const title = titleElement
+    ? titleElement.innerText.trim()
+    : document.title || window.location.hostname;
 
-  // Extract sections
   const sections = [];
-  
-  // Strategy 1: Use explicit heading structure (h1, h2, h3, h4)
+  const isChatGPT = url.includes('chatgpt.com') || url.includes('chat.openai.com');
+  const isClaude = url.includes('claude.ai');
+  const isConversational = isChatGPT || isClaude;
+
+  // === ChatGPT/Conversational page special handling ===
+  if (isConversational) {
+    const chatSections = extractChatGPTStructure(url);
+    if (chatSections.length > 0) {
+      const totalWordCount = chatSections.reduce((sum, s) => sum + s.wordCount, 0);
+      return { title, url, sections: chatSections, totalWordCount, isPDF: false };
+    }
+  }
+
+  // === Strategy 1: Use explicit heading structure ===
   const headings = document.querySelectorAll('h1, h2, h3, h4');
-  
+
   if (headings.length >= 2) {
-    // Page has clear heading structure — use it
     headings.forEach((heading, i) => {
-      // Skip if in navigation/footer
-      if (isNavigationElement(heading)) {
-        return;
-      }
-      
-      // Skip if heading is hidden
+      if (isNavigationElement(heading)) return;
+
       const style = window.getComputedStyle(heading);
-      if (style.display === 'none' || style.visibility === 'hidden') {
-        return;
-      }
-      
+      if (style.display === 'none' || style.visibility === 'hidden') return;
+
       const headingText = heading.innerText.trim();
       if (headingText.length < 3) return;
-      
-      // Find content until next heading
+
       const nextHeading = headings[i + 1];
       let content = '';
       let node = heading.nextElementSibling;
-      
+
       while (node && node !== nextHeading) {
-        // Skip navigation elements
         if (isNavigationElement(node)) {
           node = node.nextElementSibling;
           continue;
         }
-        
-        // Skip script/style/nav/header/footer tags
         if (!['SCRIPT', 'STYLE', 'NAV', 'HEADER', 'FOOTER'].includes(node.tagName)) {
           const text = node.innerText || node.textContent || '';
           if (text.trim().length > 0) {
@@ -108,80 +177,64 @@ function extractPaperStructure() {
         }
         node = node.nextElementSibling;
       }
-      
+
       content = content.trim();
       const wordCount = content.split(/\s+/).filter(w => w.length > 0).length;
-      
-      // Skip very short sections
       if (wordCount < 20) return;
-      
-      // Detect content types
+
       const sectionContainer = heading.nextElementSibling || heading.parentElement;
-      const hasCode = !!sectionContainer?.querySelector('pre, code');
-      const hasTable = !!sectionContainer?.querySelector('table');
-      const hasFigure = !!sectionContainer?.querySelector('figure, img');
-      const figureCaption = sectionContainer?.querySelector('figcaption, .caption')?.innerText || null;
-      
       sections.push({
         id: 'section-' + i,
         heading: headingText.slice(0, 100),
         text: content.slice(0, 3000),
         wordCount,
-        hasCode,
-        hasTable,
-        hasFigure,
-        figureCaption,
+        hasCode: !!sectionContainer?.querySelector('pre, code'),
+        hasTable: !!sectionContainer?.querySelector('table'),
+        hasFigure: !!sectionContainer?.querySelector('figure, img'),
+        figureCaption: sectionContainer?.querySelector('figcaption, .caption')?.innerText || null,
       });
     });
   }
-  
-  // Strategy 2: No headings — split by paragraphs/blocks into chunks
+
+  // === Strategy 2: Paragraph/block chunking ===
   if (sections.length === 0) {
-    const blockSelector = [
+    const blockSelectors = [
+      'div[data-message-author-role]',
+      'div[data-message-id]',
+      '[class*="message"]',
+      '[class*="markdown"]',
+      '[class*="prose"]',
       'p',
       'li',
       'td',
-      'div.markdown',
-      'div.prose',
-      'div[class*="markdown"]',
-      'div[class*="prose"]',
-      'div[data-message-author-role]',
-      'div[data-message-id]',
-      'div[role="presentation"]',
       'div[class*="content"]',
       'div[class*="text"]',
     ].join(', ');
 
-    const isTopLevelBlock = (el) => {
-      const parent = el.parentElement;
-      if (!parent) return true;
-      return !parent.closest(blockSelector);
-    };
+    const seenTexts = new Set();
 
-    const paragraphs = Array.from(document.querySelectorAll(blockSelector))
+    const blocks = Array.from(document.querySelectorAll(blockSelectors))
       .filter(el => {
-      // Skip navigation elements
-      if (isNavigationElement(el)) return false;
-      
-      // Skip hidden elements
-      const style = window.getComputedStyle(el);
-      if (style.display === 'none' || style.visibility === 'hidden') return false;
-      
-      const text = el.innerText.trim();
-      if (text.length <= 100 || text.split(/\s+/).length < 20) return false;
+        if (isNavigationElement(el)) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        const text = el.innerText?.trim() || '';
+        if (text.length <= 80) return false;
+        if (text.split(/\s+/).length < 15) return false;
+        // Dedup
+        const key = text.slice(0, 100);
+        if (seenTexts.has(key)) return false;
+        seenTexts.add(key);
+        return true;
+      });
 
-      // Avoid nested duplicates (prefer outer markdown/prose/message blocks)
-      return isTopLevelBlock(el);
-    });
-    
-    // Group paragraphs into chunks of ~300 words
     let chunk = '';
     let chunkIndex = 0;
-    
-    paragraphs.forEach(p => {
-      const text = p.innerText.trim();
+
+    blocks.forEach(el => {
+      const text = el.innerText?.trim() || '';
       chunk += text + ' ';
-      
+
       if (chunk.split(/\s+/).length >= 300) {
         const wordCount = chunk.split(/\s+/).length;
         sections.push({
@@ -189,24 +242,23 @@ function extractPaperStructure() {
           heading: inferHeading(chunk),
           text: chunk.trim().slice(0, 3000),
           wordCount,
-          hasCode: !!p.closest('pre, code'),
-          hasTable: !!p.closest('table'),
-          hasFigure: !!p.closest('figure, img'),
+          hasCode: !!el.closest('pre, code'),
+          hasTable: !!el.closest('table'),
+          hasFigure: false,
           figureCaption: null,
         });
         chunk = '';
         chunkIndex++;
       }
     });
-    
-    // Don't forget last chunk
-    if (chunk.split(/\s+/).length > 50) {
-      const wordCount = chunk.split(/\s+/).length;
+
+    // Remaining chunk
+    if (chunk.split(/\s+/).filter(w => w.length > 0).length > 50) {
       sections.push({
         id: 'chunk-' + chunkIndex,
         heading: inferHeading(chunk),
         text: chunk.trim().slice(0, 3000),
-        wordCount,
+        wordCount: chunk.split(/\s+/).filter(w => w.length > 0).length,
         hasCode: false,
         hasTable: false,
         hasFigure: false,
@@ -214,15 +266,15 @@ function extractPaperStructure() {
       });
     }
   }
-  
-  // Strategy 3: <article> or <main> tag fallback
+
+  // === Strategy 3: article/main tag fallback ===
   if (sections.length === 0) {
     const mainContent = document.querySelector('article, main, [role="main"], #main-content, #content, .content');
     if (mainContent) {
       const text = mainContent.innerText.trim();
       const wordCount = text.split(/\s+/).filter(w => w.length > 0).length;
-      
-      if (wordCount > 200) {
+
+      if (wordCount > 100) {
         sections.push({
           id: 'main-content',
           heading: title || 'Page Content',
@@ -236,18 +288,17 @@ function extractPaperStructure() {
       }
     }
   }
-  
-  // Strategy 4: Last resort - use body content
+
+  // === Strategy 4: Body fallback ===
   if (sections.length === 0) {
-    // Remove navigation/footer/header elements
     const bodyClone = document.body.cloneNode(true);
-    const navElements = bodyClone.querySelectorAll('nav, header, footer, [class*="nav"], [class*="menu"], [class*="footer"]');
-    navElements.forEach(el => el.remove());
-    
+    const navEls = bodyClone.querySelectorAll('nav, header, footer, [class*="nav"], [class*="menu"], [class*="footer"], script, style');
+    navEls.forEach(el => el.remove());
+
     const text = bodyClone.innerText.trim();
     const wordCount = text.split(/\s+/).filter(w => w.length > 0).length;
-    
-    if (wordCount > 200) {
+
+    if (wordCount > 100) {
       sections.push({
         id: 'body-content',
         heading: title || 'Page Content',
@@ -272,12 +323,12 @@ function extractPaperStructure() {
   };
 }
 
-// For browser context
+// Browser context
 if (typeof window !== 'undefined') {
   window.extractPaperStructure = extractPaperStructure;
 }
 
-// For Node.js context (if needed)
+// Node.js context
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = { extractPaperStructure };
 }

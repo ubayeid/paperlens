@@ -1,16 +1,17 @@
 /**
  * Content Script
  * Handles both agentic and manual modes
+ * v2.1 - MVP Polish: better empty states, retry, improved UX
  */
 
 const SERVER_URL = 'http://localhost:3000';
-// For local dev: const SERVER_URL = 'http://localhost:3000';
 
 let sidebar = null;
-let sidebarShadow = null; // Shadow root for sidebar (CRITICAL for CSS isolation)
-let sidebarHost = null; // Host element in main DOM
+let sidebarShadow = null;
+let sidebarHost = null;
 let isSidebarOpen = false;
-let currentMode = null; // 'SINGLE' or 'AGENTIC'
+let currentMode = null;
+let noContentShown = false; // Track if no-content state was already shown
 
 /**
  * Helper: Get element from shadow root
@@ -20,642 +21,410 @@ function getSidebarElement(id) {
   return sidebarShadow.querySelector(`#${id}`);
 }
 
-/**
- * Helper: Query selector in shadow root
- */
 function querySidebar(selector) {
   if (!sidebarShadow) return null;
   return sidebarShadow.querySelector(selector);
 }
 
-/**
- * Helper: Query selector all in shadow root
- */
 function querySidebarAll(selector) {
   if (!sidebarShadow) return [];
   return Array.from(sidebarShadow.querySelectorAll(selector));
 }
 
 /**
- * Show "no content" message in sidebar
+ * Show improved "no content" message with retry and tips
  */
 function showNoContentMessage(reason) {
   if (!sidebarShadow) return;
-  
+  noContentShown = true;
+
   const container = querySidebar('#pl-cards-container');
   if (!container) return;
-  
-  // Hide progress area
+
+  // Hide progress area cleanly
   const progressArea = querySidebar('#pl-progress-area');
   if (progressArea) {
     progressArea.style.display = 'none';
   }
-  
+
+  // Remove banner from page
+  const banner = document.getElementById('paperlens-banner');
+  if (banner) banner.remove();
+
   container.innerHTML = `
-    <div style="padding:24px 16px; text-align:center; 
-                color:#8888aa; font-size:13px; 
-                line-height:1.6;">
-      <div style="font-size:28px; margin-bottom:12px;">
-        🤔
+    <div class="pl-empty-state">
+      <div class="pl-empty-icon">
+        <svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="20" cy="20" r="18" stroke="#3d3d50" stroke-width="2"/>
+          <path d="M14 20 Q20 12 26 20 Q20 28 14 20Z" stroke="#6366f1" stroke-width="1.5" fill="none" opacity="0.6"/>
+          <circle cx="20" cy="20" r="3" fill="#6366f1" opacity="0.8"/>
+          <path d="M20 10 L20 8M20 32 L20 30M10 20 L8 20M32 20 L30 20" stroke="#3d3d50" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
       </div>
-      <div style="color:#e8e8f0; font-weight:600; 
-                  margin-bottom:8px; font-size:14px;">
-        Nothing worth visualizing here
+      <div class="pl-empty-title">Nothing to visualize here</div>
+      <div class="pl-empty-reason">${escapeHtml(reason || 'This section contains narrative prose without clear structure to visualize.')}</div>
+
+      <div class="pl-empty-tips">
+        <div class="pl-tips-label">Try instead:</div>
+        <div class="pl-tip-item">
+          <span class="pl-tip-icon">✦</span>
+          <span>Highlight a paragraph with steps, comparisons, or concepts</span>
+        </div>
+        <div class="pl-tip-item">
+          <span class="pl-tip-icon">✦</span>
+          <span>Select text that explains a process or framework</span>
+        </div>
+        <div class="pl-tip-item">
+          <span class="pl-tip-icon">✦</span>
+          <span>Try a different section of the page</span>
+        </div>
       </div>
-      <div style="margin-bottom:16px;">
-        ${escapeHtml(reason)}
-      </div>
-      <div style="font-size:11px; color:#555577; 
-                  border-top:1px solid #2a2a3e; 
-                  padding-top:12px;">
-        Try highlighting a specific section<br>
-        to generate a single visual instead.
+
+      <div class="pl-empty-actions">
+        <button class="pl-retry-btn" id="pl-retry-analysis">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M2 7C2 4.24 4.24 2 7 2C8.38 2 9.63 2.56 10.54 3.46L9 5H13V1L11.54 2.46C10.27 1.13 8.73 0 7 0C3.13 0 0 3.13 0 7H2ZM12 7C12 9.76 9.76 12 7 12C5.62 12 4.37 11.44 3.46 10.54L5 9H1V13L2.46 11.54C3.73 12.87 5.27 14 7 14C10.87 14 14 10.87 14 7H12Z" fill="currentColor"/>
+          </svg>
+          Retry Analysis
+        </button>
+        <button class="pl-highlight-tip-btn" id="pl-close-no-content">
+          Close
+        </button>
       </div>
     </div>
   `;
+
+  // Wire up retry button
+  const retryBtn = querySidebar('#pl-retry-analysis');
+  if (retryBtn) {
+    retryBtn.addEventListener('click', () => {
+      noContentShown = false;
+      // Re-trigger agentic analysis
+      closeSidebar();
+      setTimeout(() => {
+        // Trigger fresh analysis
+        const event = new KeyboardEvent('keydown', {
+          key: 'A', ctrlKey: true, shiftKey: true, bubbles: true
+        });
+        document.dispatchEvent(event);
+      }, 300);
+    });
+  }
+
+  const closeBtn = querySidebar('#pl-close-no-content');
+  if (closeBtn) {
+    closeBtn.addEventListener('click', closeSidebar);
+  }
 }
 
 /**
- * Update progress bar based on completed visualizations
+ * Show server-down error state inside the sidebar (replaces the spinner)
+ */
+function showServerDownState() {
+  if (!sidebarShadow) return;
+
+  // Stop the progress bar / scanning text
+  const progressArea = querySidebar('#pl-progress-area');
+  if (progressArea) progressArea.style.display = 'none';
+
+  const container = querySidebar('#pl-cards-container');
+  if (!container) return;
+
+  container.innerHTML = `
+    <div class="pl-empty-state">
+      <div class="pl-empty-icon">
+        <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+          <circle cx="20" cy="20" r="18" stroke="#3d3d50" stroke-width="2"/>
+          <path d="M20 12 L20 22" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round"/>
+          <circle cx="20" cy="28" r="1.5" fill="#ef4444"/>
+        </svg>
+      </div>
+      <div class="pl-empty-title" style="color:#f87171;">Server not running</div>
+      <div class="pl-empty-reason">
+        PaperLens needs its local server to analyze pages.
+      </div>
+
+      <div class="pl-empty-tips">
+        <div class="pl-tips-label">Start the server</div>
+        <div class="pl-tip-item" style="font-family:monospace;background:#0d0d11;padding:8px 10px;border-radius:6px;border:1px solid #2a2a38;color:#a5b4fc;font-size:11px;display:block;word-break:break-all;">
+          cd server &amp;&amp; npm start
+        </div>
+        <div class="pl-tip-item" style="margin-top:10px;">
+          <span class="pl-tip-icon">✦</span>
+          <span>Run the command above in your terminal, then click Retry below</span>
+        </div>
+        <div class="pl-tip-item">
+          <span class="pl-tip-icon">✦</span>
+          <span>Keep the terminal open while using PaperLens</span>
+        </div>
+      </div>
+
+      <div class="pl-empty-actions">
+        <button class="pl-retry-btn" id="pl-retry-server">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M2 7C2 4.24 4.24 2 7 2C8.38 2 9.63 2.56 10.54 3.46L9 5H13V1L11.54 2.46C10.27 1.13 8.73 0 7 0C3.13 0 0 3.13 0 7H2ZM12 7C12 9.76 9.76 12 7 12C5.62 12 4.37 11.44 3.46 10.54L5 9H1V13L2.46 11.54C3.73 12.87 5.27 14 7 14C10.87 14 14 10.87 14 7H12Z" fill="currentColor"/>
+          </svg>
+          Retry
+        </button>
+        <button class="pl-highlight-tip-btn" id="pl-close-server-err">Close</button>
+      </div>
+    </div>
+  `;
+
+  // Retry: re-run the analysis
+  querySidebar('#pl-retry-server')?.addEventListener('click', async () => {
+    // Reset UI to loading state
+    container.innerHTML = `
+      <div class="pl-paper-title" id="pl-paper-title" style="display:none;"></div>
+      <div class="pl-empty" id="pl-empty-state" style="color:#3d3d50;font-size:12px;padding:24px 16px;text-align:center;">Scanning sections…</div>
+    `;
+    if (progressArea) {
+      progressArea.style.display = '';
+      const progressText = querySidebar('#pl-progress-text');
+      if (progressText) progressText.textContent = 'Analyzing page…';
+      const progressFill = querySidebar('#pl-progress-fill');
+      if (progressFill) progressFill.style.width = '6%';
+    }
+    await triggerAgenticAnalysis();
+  });
+
+  querySidebar('#pl-close-server-err')?.addEventListener('click', closeSidebar);
+}
+
+/**
+ * Update progress bar
  */
 function updateProgress() {
   if (!sidebarShadow) return;
-  
+
   const cardsContainer = querySidebar('#pl-cards-container');
   if (!cardsContainer) return;
 
-  // Count completed visuals
-  // A card is "completed" if:
-  // 1. It has SVG in the main card body, OR
-  // 2. It has at least one segment with SVG
   const allCards = querySidebarAll('.pl-card');
-  let completed = 0;
-  
-  allCards.forEach(card => {
-    let hasVisual = false;
-    
-    // Check main card body
-    const cardBody = card.querySelector('.pl-card-body');
-    if (cardBody) {
-      if (cardBody.querySelector('svg') || cardBody.querySelector('.pl-error')) {
-        hasVisual = true;
-      }
-    }
-    
-    // Check segments
-    if (!hasVisual) {
-      const segmentsContainer = card.querySelector('.pl-segments-container');
-      if (segmentsContainer) {
-        const segments = segmentsContainer.querySelectorAll('.pl-segment');
-        for (const segment of segments) {
-          if (segment.querySelector('svg') || segment.querySelector('.pl-error')) {
-            hasVisual = true;
-            break;
-          }
-        }
-      }
-    }
-    
-    if (hasVisual) {
-      completed++;
-    }
-  });
+  if (allCards.length === 0) return;
 
-  const total = allCards.length;
-  
-  // Update progress text and fill
-  const progressText = querySidebar('#pl-progress-text');
+  const completedCards = querySidebarAll('.pl-card svg, .pl-card .pl-error').length;
+  const percentage = Math.round((completedCards / allCards.length) * 100);
+
   const progressFill = querySidebar('#pl-progress-fill');
-  const progressArea = querySidebar('#pl-progress-area');
-  
-  if (progressArea && total > 0) {
-    progressArea.style.display = 'block';
+  if (progressFill) {
+    progressFill.style.width = `${Math.max(10, percentage)}%`;
   }
-  
-  if (progressText && total > 0) {
-    progressText.textContent = completed === total 
-      ? `Analysis complete! ${total} sections visualized`
-      : `${completed} / ${total} sections visualized`;
+
+  const progressText = querySidebar('#pl-progress-text');
+  if (progressText && completedCards > 0) {
+    progressText.textContent = `Generating visuals… ${completedCards}/${allCards.length}`;
   }
-  
-  if (progressFill && total > 0) {
-    const percentage = Math.round((completed / total) * 100);
-    progressFill.style.width = `${percentage}%`;
-  }
-  
-  console.log('[Content] Progress updated:', { completed, total, percentage: total > 0 ? Math.round((completed / total) * 100) : 0 });
 }
 
 /**
- * Escape HTML to prevent XSS
- * @param {string} text - Text to escape
- * @returns {string} Escaped HTML
+ * Show error toast
+ */
+function showError(message) {
+  console.error('[PaperLens] Error:', message);
+
+  const sidebarElement = document.querySelector('#paperlens-sidebar') ||
+    (sidebarHost && sidebarHost.shadowRoot && sidebarHost.shadowRoot.querySelector('#paperlens-sidebar'));
+  const sidebarWidth = sidebarElement ? parseInt(getComputedStyle(sidebarHost).width) || 420 : 420;
+  const isCollapsed = sidebarElement && sidebarElement.classList.contains('pl-collapsed');
+  const effectiveSidebarWidth = isCollapsed ? 48 : sidebarWidth;
+
+  const existing = document.getElementById('paperlens-error-toast');
+  if (existing) existing.remove();
+
+  const toast = document.createElement('div');
+  toast.id = 'paperlens-error-toast';
+
+  Object.assign(toast.style, {
+    position: 'fixed',
+    bottom: '20px',
+    right: `${effectiveSidebarWidth + 12}px`,
+    background: '#1e1014',
+    border: '1px solid rgba(239, 68, 68, 0.4)',
+    color: '#f5f5f7',
+    padding: '12px 16px',
+    borderRadius: '10px',
+    fontSize: '13px',
+    maxWidth: '300px',
+    minWidth: '200px',
+    zIndex: '999999',
+    boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+    opacity: '0',
+    transform: 'translateY(12px)',
+    transition: 'opacity 0.25s ease, transform 0.25s ease',
+    cursor: 'pointer',
+    wordWrap: 'break-word',
+    lineHeight: '1.5',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+  });
+
+  toast.innerHTML = `
+    <div style="display:flex;align-items:flex-start;gap:10px;">
+      <div style="color:#ef4444;flex-shrink:0;margin-top:1px;">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <circle cx="7" cy="7" r="6.5" stroke="currentColor"/>
+          <path d="M7 4V7.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          <circle cx="7" cy="10" r="0.75" fill="currentColor"/>
+        </svg>
+      </div>
+      <div style="flex:1;">${escapeHtml(message)}</div>
+      <div style="color:#52525b;flex-shrink:0;font-size:16px;line-height:1;cursor:pointer" id="pl-toast-close">×</div>
+    </div>
+  `;
+
+  document.body.appendChild(toast);
+
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      toast.style.opacity = '1';
+      toast.style.transform = 'translateY(0)';
+    });
+  });
+
+  const dismiss = () => {
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateY(12px)';
+    setTimeout(() => toast.remove(), 300);
+  };
+
+  toast.querySelector('#pl-toast-close')?.addEventListener('click', dismiss);
+  setTimeout(dismiss, 6000);
+}
+
+/**
+ * Escape HTML
  */
 function escapeHtml(text) {
   const div = document.createElement('div');
-  div.textContent = text;
+  div.appendChild(document.createTextNode(text));
   return div.innerHTML;
 }
 
 /**
- * Ping background service worker to wake it up
- * @returns {Promise<boolean>} True if ping successful
- */
-async function pingBackground() {
-  for (let i = 0; i < 3; i++) {
-    try {
-      const response = await chrome.runtime.sendMessage({ type: 'PING' });
-      if (response && response.status === 'ok') {
-        return true;
-      }
-    } catch (error) {
-      console.log(`[Content] Ping attempt ${i + 1} failed:`, error);
-    }
-    if (i < 2) {
-      await new Promise(resolve => setTimeout(resolve, 200));
-    }
-  }
-  return false;
-}
-
-/**
- * Detect content type from selection
- * @param {string} text - Selected text
- * @returns {string} Content type: 'code', 'table', or 'text'
- */
-function detectContentType(text) {
-  // Check for code patterns
-  if (text.match(/^\s*(function|class|const|let|var|import|export|def |\w+\s*\([^)]*\)\s*\{)/m)) {
-    return 'code';
-  }
-  
-  // Check for table patterns
-  if (text.match(/\|\s*.+\s*\|/m) || text.split('\n').filter(l => l.includes('\t')).length > 3) {
-    return 'table';
-  }
-  
-  return 'text';
-}
-
-/**
- * Show floating visualize button
- * @param {Range} range - Text selection range
- */
-function showVisualizeButton(range) {
-  console.log('[Content] showVisualizeButton called');
-  
-  if (!range) {
-    console.error('[Content] Invalid range provided to showVisualizeButton');
-    return;
-  }
-  
-  // Remove existing button
-  const existing = document.getElementById('paperlens-visualize-btn');
-  if (existing) {
-    existing.remove();
-  }
-  
-  // Verify document.body exists
-  if (!document.body) {
-    console.error('[Content] document.body is null, cannot show button');
-    return;
-  }
-
-  // Store the range for position updates
-  const button = document.createElement('button');
-  button.id = 'paperlens-visualize-btn';
-  button.className = 'paperlens-floating-btn';
-  button.textContent = '✦ Visualize';
-  button.style.position = 'fixed';
-  button.style.zIndex = '10000';
-  button.style.pointerEvents = 'auto';
-  
-  // Function to update button position based on selection
-  const updateButtonPosition = () => {
-    try {
-      // Check if range is still valid
-      if (!range) {
-        if (button._cleanup) button._cleanup();
-        if (button._selectionChangeHandler) {
-          document.removeEventListener('selectionchange', button._selectionChangeHandler);
-        }
-        button.remove();
-        return;
-      }
-      
-      // Check if range is collapsed (no selection)
-      if (range.collapsed) {
-        return; // Don't remove, just don't update position
-      }
-      
-      const rect = range.getBoundingClientRect();
-      
-      // Only show button if selection is visible in viewport
-      const viewportHeight = window.innerHeight;
-      const viewportWidth = window.innerWidth;
-      
-      // Check if selection is visible (at least partially)
-      const isVisible = !(rect.bottom < 0 || rect.top > viewportHeight || rect.right < 0 || rect.left > viewportWidth);
-      
-      if (!isVisible && (rect.width === 0 && rect.height === 0)) {
-        // Selection is completely out of view, hide button but don't remove it
-        button.style.display = 'none';
-        return;
-      }
-      
-      // Show button if it was hidden
-      button.style.display = 'block';
-      
-      // Position button to the right of selection, or below if not enough space
-      const spaceOnRight = viewportWidth - rect.right;
-      const buttonWidth = 120; // Approximate button width
-      
-      if (spaceOnRight > buttonWidth + 20) {
-        // Position to the right
-        button.style.left = `${rect.right + 10}px`;
-        button.style.top = `${rect.top}px`;
-        button.style.right = 'auto';
-        button.style.bottom = 'auto';
-      } else {
-        // Position below selection
-        button.style.left = `${rect.left}px`;
-        button.style.top = `${rect.bottom + 10}px`;
-        button.style.right = 'auto';
-        button.style.bottom = 'auto';
-      }
-    } catch (error) {
-      // Range might be invalid, remove button
-      console.log('[Content] Error updating button position:', error);
-      if (button._cleanup) button._cleanup();
-      if (button._selectionChangeHandler) {
-        document.removeEventListener('selectionchange', button._selectionChangeHandler);
-      }
-      button.remove();
-    }
-  };
-  
-  // Initial position
-  updateButtonPosition();
-  
-  // Update position on scroll and resize
-  const scrollHandler = () => updateButtonPosition();
-  const resizeHandler = () => updateButtonPosition();
-  
-  window.addEventListener('scroll', scrollHandler, { passive: true });
-  window.addEventListener('resize', resizeHandler, { passive: true });
-  
-  // Store cleanup function
-  button._cleanup = () => {
-    window.removeEventListener('scroll', scrollHandler);
-    window.removeEventListener('resize', resizeHandler);
-  };
-
-  button.onclick = async (e) => {
-    e.stopPropagation();
-    e.preventDefault();
-    
-    // Cleanup handlers before removing button
-    if (button._cleanup) {
-      button._cleanup();
-    }
-    if (button._selectionChangeHandler) {
-      document.removeEventListener('selectionchange', button._selectionChangeHandler);
-    }
-    
-    button.remove();
-    
-    // Get text from the range - this should be ONLY the selected text
-    const text = range.toString().trim();
-    
-    // Debug logging
-    console.log('[Content] Visualize button clicked');
-    console.log('[Content] Selected text length:', text.length);
-    console.log('[Content] Selected text preview:', text.substring(0, 100));
-    
-    if (text.length < 15) {
-      console.warn('[Content] Selected text too short:', text.length);
-      return;
-    }
-
-    const contentType = detectContentType(text);
-    
-    // Store the selection range to keep it highlighted
-    const selection = window.getSelection();
-    let savedRange = null;
-    if (selection.rangeCount > 0) {
-      savedRange = selection.getRangeAt(0).cloneRange();
-    }
-    
-    // Add visual highlight to selected text
-    let highlightSpan = null;
-    if (savedRange) {
-      try {
-        highlightSpan = document.createElement('span');
-        highlightSpan.className = 'paperlens-selection-highlight';
-        highlightSpan.style.backgroundColor = 'rgba(124, 92, 191, 0.3)'; // Accent color with transparency
-        highlightSpan.style.padding = '2px 0';
-        highlightSpan.style.borderRadius = '2px';
-        savedRange.surroundContents(highlightSpan);
-      } catch (error) {
-        // If surroundContents fails (e.g., range spans multiple elements), try a different approach
-        console.log('[Content] Could not highlight selection:', error);
-        // Fallback: just keep the native selection
-      }
-    }
-    
-    // Ping background first
-    const pinged = await pingBackground();
-    if (!pinged) {
-      // Remove highlight if ping failed
-      if (highlightSpan) {
-        const parent = highlightSpan.parentNode;
-        if (parent) {
-          parent.replaceChild(document.createTextNode(highlightSpan.textContent), highlightSpan);
-          parent.normalize();
-        }
-      }
-      alert('PaperLens service unavailable. Please try again.');
-      return;
-    }
-
-    // Show sidebar in SINGLE mode, preserving selection and showing selected text
-    showSidebar('SINGLE', { 
-      preserveSelection: true, 
-      selectedText: text 
-    });
-    
-    // Restore selection after sidebar is created to keep it highlighted
-    if (savedRange && window.getSelection && !highlightSpan) {
-      setTimeout(() => {
-        try {
-          const sel = window.getSelection();
-          sel.removeAllRanges();
-          sel.addRange(savedRange);
-        } catch (error) {
-          console.log('[Content] Could not restore selection:', error);
-        }
-      }, 100);
-    }
-    
-    // Store highlight span reference for cleanup when sidebar closes
-    if (highlightSpan && sidebar) {
-      sidebar._highlightSpan = highlightSpan;
-    }
-    
-    // Show loading state in shadow root
-    const containerId = 'pl-single-visual';
-    if (sidebarShadow) {
-      const container = querySidebar(`#${containerId}`);
-      if (container) {
-        container.innerHTML = '<div class="pl-skeleton"></div>';
-      }
-    }
-
-    // Send generate request
-    try {
-      // Verify we're sending the correct text (not full page)
-      console.log('[Content] Sending generate request with text length:', text.length);
-      console.log('[Content] Text preview (first 200 chars):', text.substring(0, 200));
-      
-      chrome.runtime.sendMessage({
-        type: 'GENERATE',
-        text,
-        contentType,
-      }, (response) => {
-        if (chrome.runtime.lastError) {
-          console.error('[Content] Error:', chrome.runtime.lastError);
-          showError('Failed to generate visual');
-          return;
-        }
-
-        if (!sidebarShadow) {
-          console.error('[Content] Sidebar shadow root not available for rendering');
-          return;
-        }
-
-        const container = querySidebar(`#${containerId}`);
-        if (!container) {
-          console.error('[Content] Single visual container not found');
-          return;
-        }
-
-        if (response && response.segments && Array.isArray(response.segments)) {
-          // Multiple segments - display each one
-          container.innerHTML = '';
-          
-          response.segments.forEach((segment, index) => {
-            const segmentDiv = document.createElement('div');
-            segmentDiv.className = 'pl-segment';
-            
-            const titleDiv = document.createElement('div');
-            titleDiv.className = 'pl-segment-heading';
-            titleDiv.textContent = segment.title || `Segment ${index + 1}`;
-            segmentDiv.appendChild(titleDiv);
-            
-            const visualDiv = document.createElement('div');
-            visualDiv.className = 'napkin-visual-wrapper';
-            
-            if (segment.svg) {
-              const cleanSvg = segment.svg.replace(/<script[\s\S]*?<\/script>/gi, '');
-              visualDiv.innerHTML = cleanSvg;
-              const svgEl = visualDiv.querySelector('svg');
-              if (svgEl) {
-                svgEl.style.width = '100%';
-                svgEl.style.height = 'auto';
-              }
-            } else {
-              visualDiv.innerHTML = '<div class="pl-error">Visual unavailable</div>';
-            }
-            
-            segmentDiv.appendChild(visualDiv);
-            container.appendChild(segmentDiv);
-          });
-        } else if (response && response.svg) {
-          // Single segment (backward compatible)
-          const container = querySidebar(`#${containerId}`);
-          if (container) {
-            const cleanSvg = response.svg.replace(/<script[\s\S]*?<\/script>/gi, '');
-            container.innerHTML = `<div class="napkin-visual-wrapper">${cleanSvg}</div>`;
-            const svgEl = container.querySelector('svg');
-            if (svgEl) {
-              svgEl.style.width = '100%';
-              svgEl.style.height = 'auto';
-            }
-          }
-        } else if (response && response.error) {
-          // Handle evaluation rejection with user-friendly message
-          if (response.evaluationRejected) {
-            const reason = response.reason || 'Content not suitable for visualization';
-            const potential = response.visualizationPotential || 'low';
-            showError(`Content evaluation: ${reason}. Visualization potential: ${potential}. Try selecting text with processes, concepts, relationships, or structured information.`);
-          } else {
-            showError(response.error);
-          }
-        }
-      });
-    } catch (error) {
-      console.error('[Content] Error sending message:', error);
-      showError('Failed to generate visual');
-    }
-  };
-
-  // Ensure document.body exists before appending
-  if (!document.body) {
-    console.error('[Content] Cannot append button: document.body is null');
-    // Try again after a short delay
-    setTimeout(() => {
-      if (document.body) {
-        document.body.appendChild(button);
-        console.log('[Content] Button appended after delay');
-      } else {
-        console.error('[Content] Still cannot append button: document.body is null');
-      }
-    }, 100);
-    return;
-  }
-  
-  try {
-    document.body.appendChild(button);
-    console.log('[Content] Visualize button appended successfully');
-  } catch (error) {
-    console.error('[Content] Error appending button:', error);
-  }
-
-  // Remove button after 10 seconds or when selection changes
-  const timeoutId = setTimeout(() => {
-    if (button._cleanup) button._cleanup();
-    button.remove();
-  }, 10000);
-  
-  // Remove button when selection changes
-  const selectionChangeHandler = () => {
-    const selection = window.getSelection();
-    if (!selection.rangeCount || selection.getRangeAt(0) !== range) {
-      clearTimeout(timeoutId);
-      if (button._cleanup) button._cleanup();
-      button.remove();
-      document.removeEventListener('selectionchange', selectionChangeHandler);
-    }
-  };
-  
-  document.addEventListener('selectionchange', selectionChangeHandler);
-  
-  // Store selection change handler for cleanup
-  button._selectionChangeHandler = selectionChangeHandler;
-}
-
-/**
- * Get sidebar CSS (for Shadow DOM injection)
- * All CSS is isolated inside shadow root - host page CSS cannot interfere
+ * Get sidebar CSS
  */
 function getSidebarCSS() {
   return `
-    /* Reset everything inside shadow DOM */
     *, *::before, *::after {
       box-sizing: border-box;
       margin: 0;
       padding: 0;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', 'Roboto', sans-serif;
+    }
+
+    :host {
+      all: initial;
+      display: block;
     }
 
     #paperlens-sidebar {
+      position: fixed;
+      top: 0;
+      right: 0;
       width: 420px;
       height: 100vh;
       background: #0d0d11;
+      border-left: 1px solid #1e1e28;
+      z-index: 2147483647;
+      overflow: hidden;
       display: flex;
       flex-direction: column;
-      overflow: hidden;
-      border-left: 1px solid #25252a;
-      box-shadow: -4px 0 20px rgba(0,0,0,0.4);
-      color: #e8e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;
+      box-shadow: -4px 0 32px rgba(0,0,0,0.6);
+      color: #f5f5f7;
       font-size: 13px;
-      line-height: 1.5;
     }
 
     /* Header */
     .pl-header {
       display: flex;
-      align-items: center;
       justify-content: space-between;
-      padding: 14px 16px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      align-items: center;
+      padding: 16px 18px;
+      border-bottom: 1px solid #1e1e28;
+      background: #0d0d11;
       flex-shrink: 0;
-      width: 100%;
-      background: rgba(13, 13, 17, 0.95);
-      backdrop-filter: blur(20px);
     }
 
     .pl-title {
-      font-size: 15px;
-      font-weight: 600;
+      font-size: 13px;
+      font-weight: 700;
       color: #f5f5f7;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      letter-spacing: -0.01em;
+    }
+
+    .pl-title-logo {
       display: flex;
       align-items: center;
       gap: 6px;
     }
 
-    .pl-title::before {
-      content: '✦';
-      color: #6366f1;
-      font-size: 16px;
-    }
-
     .pl-badge {
-      font-size: 10px;
-      background: rgba(99, 102, 241, 0.1);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
       color: #a5b4fc;
+      background: rgba(99, 102, 241, 0.15);
+      border: 1px solid rgba(99, 102, 241, 0.3);
       padding: 2px 7px;
-      border-radius: 4px;
-      letter-spacing: 0.05em;
-      font-weight: 600;
+      border-radius: 20px;
       text-transform: uppercase;
-      border: 1px solid rgba(255, 255, 255, 0.06);
     }
 
-    .pl-close, .pl-collapse {
-      background: none;
-      border: none;
+    .pl-header-btns {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+    }
+
+    .pl-collapse, .pl-close {
+      width: 28px;
+      height: 28px;
+      background: transparent;
+      border: 1px solid transparent;
       color: #71717a;
+      border-radius: 6px;
       cursor: pointer;
-      font-size: 18px;
-      padding: 4px 8px;
-      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      transition: all 0.15s ease;
       line-height: 1;
-      transition: all 150ms ease;
-    }
-    .pl-close:hover, .pl-collapse:hover { 
-      background: #16161b; 
-      color: #f5f5f7; 
-    }
-    .pl-collapse {
-      font-size: 14px;
     }
 
-    /* Progress area */
+    .pl-collapse:hover, .pl-close:hover {
+      background: #1c1c24;
+      border-color: #2a2a38;
+      color: #a1a1aa;
+    }
+
+    /* Progress */
     .pl-progress-area {
-      padding: 10px 16px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      padding: 10px 18px;
+      border-bottom: 1px solid #1e1e28;
+      background: #0f0f15;
       flex-shrink: 0;
-      width: 100%;
-      background: #16161b;
     }
 
     .pl-progress-text {
-      font-size: 12px;
-      color: #a1a1aa;
+      font-size: 11px;
+      color: #71717a;
       margin-bottom: 6px;
+      font-weight: 500;
     }
 
     .pl-progress-bar-bg {
-      width: 100%;
       height: 3px;
-      background: #25252a;
+      background: #1e1e28;
       border-radius: 2px;
       overflow: hidden;
     }
 
     .pl-progress-bar-fill {
-      height: 3px;
+      height: 100%;
       background: linear-gradient(90deg, #6366f1, #818cf8);
       border-radius: 2px;
       transition: width 0.4s ease;
@@ -666,269 +435,373 @@ function getSidebarCSS() {
     .pl-cards {
       flex: 1;
       overflow-y: auto;
+      overflow-x: hidden;
       padding: 12px;
       display: flex;
       flex-direction: column;
-      gap: 12px;
-      width: 100%;
-      min-width: 0;
+      gap: 10px;
+    }
+
+    .pl-cards::-webkit-scrollbar {
+      width: 5px;
+    }
+
+    .pl-cards::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .pl-cards::-webkit-scrollbar-thumb {
+      background: #2a2a38;
+      border-radius: 3px;
+    }
+
+    .pl-cards::-webkit-scrollbar-thumb:hover {
+      background: #3a3a4a;
     }
 
     /* Individual card */
     .pl-card {
-      width: 100%;
-      min-width: 0;
-      background: #16161b;
-      border: 1px solid rgba(255, 255, 255, 0.06);
-      border-radius: 8px;
-      overflow: visible;
-      flex-shrink: 0;
-      animation: fadeUp 0.4s ease-out;
+      background: #111118;
+      border: 1px solid #1e1e28;
+      border-radius: 10px;
+      overflow: hidden;
+      transition: border-color 0.2s ease;
+      animation: cardSlideIn 0.25s ease forwards;
     }
 
-    @keyframes fadeUp {
+    @keyframes cardSlideIn {
       from { opacity: 0; transform: translateY(8px); }
       to { opacity: 1; transform: translateY(0); }
     }
 
+    .pl-card:hover {
+      border-color: #2a2a38;
+    }
+
     .pl-card-header {
-      padding: 10px 14px;
       display: flex;
-      align-items: center;
       justify-content: space-between;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-      width: 100%;
+      align-items: center;
+      padding: 10px 14px;
+      cursor: pointer;
+      user-select: none;
     }
 
     .pl-card-title {
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 600;
-      color: #f5f5f7;
-      white-space: normal;
-      overflow: visible;
-      word-wrap: break-word;
-      word-break: normal;
+      color: #d4d4d8;
       flex: 1;
-      min-width: 0;
-      line-height: 1.4;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
-    /* Card body - where SVG goes */
-    .pl-card-body {
-      width: 100%;
-      min-width: 0;
-      min-height: 160px;
-      padding: 12px;
+    .pl-card-meta {
       display: flex;
       align-items: center;
-      justify-content: center;
-      box-sizing: border-box;
+      gap: 6px;
+      flex-shrink: 0;
     }
 
-    /* SVG from Napkin - make it responsive */
-    .pl-card-body svg {
-      width: 100% !important;
-      height: auto !important;
-      max-width: 100% !important;
-      display: block;
+    .pl-card-type {
+      font-size: 9px;
+      font-weight: 600;
+      color: #6366f1;
+      background: rgba(99, 102, 241, 0.1);
+      padding: 2px 6px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .pl-card-body {
+      padding: 0 14px 14px;
     }
 
     /* Loading skeleton */
     .pl-skeleton {
-      width: 100%;
       height: 160px;
-      background: linear-gradient(
-        90deg, 
-        #16161b 0%, 
-        #2d2d33 50%, 
-        #16161b 100%
-      );
-      background-size: 200% 100%;
-      animation: shimmer 1.5s infinite;
-      border-radius: 4px;
+      background: #16161e;
+      border-radius: 8px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .pl-skeleton::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.03), transparent);
+      animation: shimmer 1.6s infinite;
     }
 
     @keyframes shimmer {
-      0% { background-position: -200% 0; }
-      100% { background-position: 200% 0; }
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(100%); }
     }
 
-    /* Loading timer text */
-    .pl-loading-text {
-      font-size: 11px;
-      color: #71717a;
-      text-align: center;
-      margin-top: 8px;
+    /* Timer */
+    .pl-timer {
+      font-size: 10px;
+      color: #52525b;
+      font-variant-numeric: tabular-nums;
+      padding: 4px 0 8px;
     }
 
-    /* Error card */
+    /* SVG visual wrapper */
+    .napkin-visual-wrapper {
+      background: white;
+      border-radius: 8px;
+      padding: 8px;
+      margin-top: 4px;
+      overflow: hidden;
+    }
+
+    .napkin-visual-wrapper svg {
+      display: block;
+      width: 100% !important;
+      height: auto !important;
+    }
+
+    /* Error state */
     .pl-error {
-      padding: 12px;
-      font-size: 12px;
-      color: #ef4444;
-      text-align: center;
+      font-size: 11px;
+      color: #f87171;
+      background: rgba(239, 68, 68, 0.06);
+      border: 1px solid rgba(239, 68, 68, 0.15);
+      border-radius: 6px;
+      padding: 10px 12px;
+      line-height: 1.5;
     }
 
     /* Empty state */
     .pl-empty {
       text-align: center;
-      padding: 40px 20px;
+      padding: 32px 16px;
+      color: #52525b;
+      font-size: 12px;
+      line-height: 1.7;
+    }
+
+    /* ===== IMPROVED EMPTY / NO-CONTENT STATE ===== */
+    .pl-empty-state {
+      padding: 28px 20px 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      animation: cardSlideIn 0.3s ease forwards;
+    }
+
+    .pl-empty-icon {
+      margin-bottom: 16px;
+      opacity: 0.7;
+    }
+
+    .pl-empty-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #e4e4e7;
+      margin-bottom: 8px;
+      letter-spacing: -0.01em;
+    }
+
+    .pl-empty-reason {
+      font-size: 12px;
       color: #71717a;
-      font-size: 13px;
       line-height: 1.6;
+      margin-bottom: 20px;
+      max-width: 300px;
     }
 
-    /* Scrollbar styling */
-    .pl-cards::-webkit-scrollbar { width: 4px; }
-    .pl-cards::-webkit-scrollbar-track { background: transparent; }
-    .pl-cards::-webkit-scrollbar-thumb { 
-      background: #25252a; 
-      border-radius: 2px; 
-    }
-    .pl-cards::-webkit-scrollbar-thumb:hover {
-      background: #2d2d33;
+    .pl-empty-tips {
+      background: #111118;
+      border: 1px solid #1e1e28;
+      border-radius: 10px;
+      padding: 14px 16px;
+      text-align: left;
+      width: 100%;
+      margin-bottom: 18px;
     }
 
-    /* Slide in animation */
-    #paperlens-sidebar {
-      animation: slideIn 0.3s ease-out;
+    .pl-tips-label {
+      font-size: 10px;
+      font-weight: 700;
+      color: #52525b;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 10px;
     }
-    @keyframes slideIn {
-      from { transform: translateX(420px); opacity: 0; }
-      to { transform: translateX(0); opacity: 1; }
+
+    .pl-tip-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      margin-bottom: 8px;
+      font-size: 12px;
+      color: #a1a1aa;
+      line-height: 1.5;
+    }
+
+    .pl-tip-item:last-child {
+      margin-bottom: 0;
+    }
+
+    .pl-tip-icon {
+      color: #6366f1;
+      flex-shrink: 0;
+      font-size: 10px;
+      margin-top: 2px;
+    }
+
+    .pl-empty-actions {
+      display: flex;
+      gap: 8px;
+      width: 100%;
+    }
+
+    .pl-retry-btn {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      background: rgba(99, 102, 241, 0.12);
+      border: 1px solid rgba(99, 102, 241, 0.3);
+      color: #a5b4fc;
+      padding: 9px 14px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      font-family: inherit;
+    }
+
+    .pl-retry-btn:hover {
+      background: rgba(99, 102, 241, 0.2);
+      border-color: rgba(99, 102, 241, 0.5);
+      color: #c7d2fe;
+    }
+
+    .pl-highlight-tip-btn {
+      padding: 9px 14px;
+      background: transparent;
+      border: 1px solid #2a2a38;
+      color: #71717a;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      font-family: inherit;
+    }
+
+    .pl-highlight-tip-btn:hover {
+      background: #1c1c24;
+      color: #a1a1aa;
+      border-color: #3a3a4a;
     }
 
     /* Paper title */
     .pl-paper-title {
-      padding: 12px 16px;
-      margin-bottom: 12px;
-      background: #16161b;
-      border-radius: 8px;
-      border: 1px solid rgba(255, 255, 255, 0.06);
-      font-size: 15px;
+      font-size: 12px;
       font-weight: 600;
-      color: #f5f5f7;
-      line-height: 1.5;
-      word-wrap: break-word;
-      word-break: normal;
-      white-space: normal;
+      color: #a1a1aa;
+      padding: 8px 4px;
+      border-bottom: 1px solid #1e1e28;
+      margin-bottom: 4px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
-    /* Selected text display */
+    /* Single visual */
+    .pl-single-visual {
+      width: 100%;
+      padding: 4px;
+    }
+
+    /* Segment */
+    .pl-segment {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid #1e1e28;
+    }
+
+    .pl-segment-heading {
+      font-size: 10px;
+      font-weight: 700;
+      color: #71717a;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 6px;
+    }
+
+    /* Selected text preview */
     .pl-selected-text {
-      padding: 12px 16px;
-      margin-bottom: 12px;
-      background: #16161b;
+      background: #111118;
+      border: 1px solid #1e1e28;
       border-radius: 8px;
-      border: 1px solid rgba(255, 255, 255, 0.06);
+      padding: 10px 12px;
+      margin-bottom: 12px;
     }
 
     .pl-selected-label {
       font-size: 10px;
-      font-weight: 600;
-      color: #71717a;
+      font-weight: 700;
+      color: #52525b;
       text-transform: uppercase;
-      letter-spacing: 0.8px;
-      margin-bottom: 8px;
+      letter-spacing: 0.06em;
+      margin-bottom: 6px;
     }
 
     .pl-selected-content {
       font-size: 12px;
       line-height: 1.6;
       color: #a1a1aa;
-      max-height: 200px;
+      max-height: 180px;
       overflow-y: auto;
-      white-space: pre-wrap;
-      word-wrap: break-word;
-      padding: 8px;
-      background: rgba(0, 0, 0, 0.2);
-      border-radius: 4px;
-    }
-
-    /* Single visual container */
-    .pl-single-visual {
-      width: 100%;
-      min-width: 0;
-      padding: 12px;
-    }
-
-    /* Segment container */
-    .pl-segments-container {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      width: 100%;
-      min-width: 0;
-      padding: 12px;
-    }
-
-    .pl-segment {
-      margin-top: 12px;
-      padding-top: 12px;
-      border-top: 1px solid rgba(255, 255, 255, 0.06);
-      width: 100%;
-      min-width: 0;
-    }
-
-    .pl-segment-heading {
-      font-size: 11px;
-      font-weight: 600;
-      color: #a1a1aa;
-      margin-bottom: 8px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      word-wrap: break-word;
-      word-break: normal;
-      white-space: normal;
-    }
-
-    .pl-segment-visual {
-      width: 100%;
-      min-width: 0;
-    }
-
-    /* Napkin visual wrapper */
-    .napkin-visual-wrapper {
-      margin-top: 8px;
-      border-radius: 8px;
-      overflow: visible;
-      background: white;
-      padding: 8px;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
-      width: 100%;
-      min-width: 0;
-    }
-
-    .napkin-visual-wrapper svg {
-      display: block;
-      width: 100%;
-      height: auto;
-      border-radius: 4px;
     }
 
     /* Collapsed state */
-    #paperlens-sidebar.pl-collapsed {
-      width: 48px;
-    }
     #paperlens-sidebar.pl-collapsed .pl-cards,
     #paperlens-sidebar.pl-collapsed .pl-progress-area {
       display: none;
     }
+
     #paperlens-sidebar.pl-collapsed .pl-title,
     #paperlens-sidebar.pl-collapsed .pl-badge {
       display: none;
+    }
+
+    /* Resize handle */
+    .pl-resize-handle {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 4px;
+      height: 100%;
+      cursor: ew-resize;
+      z-index: 10;
+      transition: background 0.15s ease;
+    }
+
+    .pl-resize-handle:hover {
+      background: rgba(99, 102, 241, 0.3);
     }
   `;
 }
 
 /**
- * Get sidebar HTML structure
+ * Get sidebar HTML
  */
 function getSidebarHTML(mode, options = {}) {
   const selectedTextSection = (mode === 'SINGLE' && options.selectedText) ? `
     <div class="pl-selected-text">
-      <div class="pl-selected-label">Selected Text:</div>
-      <div class="pl-selected-content">${escapeHtml(options.selectedText.substring(0, 500))}${options.selectedText.length > 500 ? '...' : ''}</div>
+      <div class="pl-selected-label">Selected Text</div>
+      <div class="pl-selected-content">${escapeHtml(options.selectedText.substring(0, 500))}${options.selectedText.length > 500 ? '…' : ''}</div>
     </div>
   ` : '';
 
@@ -936,42 +809,55 @@ function getSidebarHTML(mode, options = {}) {
     return `
       <div class="pl-header">
         <div class="pl-title">
-          PaperLens
+          <div class="pl-title-logo">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="8" r="7" stroke="#6366f1" stroke-width="1.5"/>
+              <circle cx="8" cy="8" r="3" fill="#6366f1" opacity="0.6"/>
+            </svg>
+            PaperLens
+          </div>
           <span class="pl-badge">Manual</span>
         </div>
-        <div style="display:flex;gap:4px;align-items:center;">
-          <button class="pl-collapse" id="pl-collapse-btn">◀</button>
-          <button class="pl-close" id="pl-close-btn">×</button>
+        <div class="pl-header-btns">
+          <button class="pl-collapse" id="pl-collapse-btn" title="Collapse">◀</button>
+          <button class="pl-close" id="pl-close-btn" title="Close">×</button>
         </div>
       </div>
       <div class="pl-cards" id="pl-cards-container">
         ${selectedTextSection}
-        <div class="pl-single-visual" id="pl-single-visual"></div>
+        <div class="pl-single-visual" id="pl-single-visual">
+          <div class="pl-skeleton"></div>
+        </div>
       </div>
     `;
   } else {
     return `
       <div class="pl-header">
         <div class="pl-title">
-          PaperLens
-          <span class="pl-badge" id="pl-mode-badge">AGENTIC</span>
+          <div class="pl-title-logo">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="8" r="7" stroke="#6366f1" stroke-width="1.5"/>
+              <circle cx="8" cy="8" r="3" fill="#6366f1" opacity="0.6"/>
+            </svg>
+            PaperLens
+          </div>
+          <span class="pl-badge" id="pl-mode-badge">Agentic</span>
         </div>
-        <div style="display:flex;gap:4px;align-items:center;">
-          <button class="pl-collapse" id="pl-collapse-btn">◀</button>
-          <button class="pl-close" id="pl-close-btn">×</button>
+        <div class="pl-header-btns">
+          <button class="pl-collapse" id="pl-collapse-btn" title="Collapse">◀</button>
+          <button class="pl-close" id="pl-close-btn" title="Close">×</button>
         </div>
       </div>
-      <div class="pl-progress-area" id="pl-progress-area" style="display:none;">
-        <div class="pl-progress-text" id="pl-progress-text">Analyzing...</div>
+      <div class="pl-progress-area" id="pl-progress-area">
+        <div class="pl-progress-text" id="pl-progress-text">Analyzing page…</div>
         <div class="pl-progress-bar-bg">
-          <div class="pl-progress-bar-fill" id="pl-progress-fill"></div>
+          <div class="pl-progress-bar-fill" id="pl-progress-fill" style="width:6%"></div>
         </div>
       </div>
       <div class="pl-cards" id="pl-cards-container">
-        <div class="pl-paper-title" id="pl-paper-title" style="display:none;">Loading...</div>
-        <div class="pl-empty" id="pl-empty-state">
-          Highlight text and click Visualize,<br>
-          or press Ctrl+Shift+A to analyze the full page.
+        <div class="pl-paper-title" id="pl-paper-title" style="display:none;"></div>
+        <div class="pl-empty" id="pl-empty-state" style="color:#3d3d50;font-size:12px;padding:24px 16px;text-align:center;">
+          Scanning sections…
         </div>
       </div>
     `;
@@ -979,25 +865,14 @@ function getSidebarHTML(mode, options = {}) {
 }
 
 /**
- * Create sidebar using Shadow DOM (CRITICAL for CSS isolation)
+ * Create sidebar using Shadow DOM
  */
 function createSidebar(mode, options = {}) {
-  // Remove existing sidebar if present
   const existing = document.getElementById('paperlens-host');
-  if (existing) {
-    existing.remove();
-  }
-  
-  // Reset body margin
-  document.body.style.marginRight = '';
-  document.body.style.transition = '';
+  if (existing) existing.remove();
 
-  // Create host element
   const host = document.createElement('div');
   host.id = 'paperlens-host';
-  
-  // CRITICAL: These styles go on the HOST element in the main DOM
-  // They must be set via JS style property, not a stylesheet
   host.style.cssText = `
     position: fixed !important;
     top: 0 !important;
@@ -1012,16 +887,12 @@ function createSidebar(mode, options = {}) {
     box-sizing: border-box !important;
   `;
 
-  // Attach Shadow DOM - 'open' mode for debugging
   const shadow = host.attachShadow({ mode: 'open' });
 
-  // Inject all sidebar CSS inside the shadow root
-  // Shadow DOM is FULLY ISOLATED from host page CSS
   const style = document.createElement('style');
   style.textContent = getSidebarCSS();
   shadow.appendChild(style);
 
-  // Create sidebar inner HTML inside shadow root
   const sidebarDiv = document.createElement('div');
   sidebarDiv.id = 'paperlens-sidebar';
   sidebarDiv.innerHTML = getSidebarHTML(mode, options);
@@ -1029,259 +900,108 @@ function createSidebar(mode, options = {}) {
 
   document.body.appendChild(host);
 
-  // Push body content left
-  document.body.style.marginRight = '420px';
-  document.body.style.transition = 'margin-right 0.3s ease';
-  document.body.style.boxSizing = 'border-box';
-
-  // Store references
   sidebarHost = host;
   sidebarShadow = shadow;
   sidebar = sidebarDiv;
 
-  return shadow; // return shadow root for later DOM access
+  return shadow;
 }
 
 /**
- * Show sidebar
- * @param {string} mode - 'SINGLE' or 'AGENTIC'
- * @param {object} options - Optional: { preserveSelection: boolean, selectedText: string }
- */
-function showSidebar(mode, options = {}) {
-  // Detect PDF (only restriction - PDFs can't be analyzed)
-  const isChromePDF = window.location.protocol === 'chrome-extension:' && 
-                      window.location.hostname.includes('mhjfbmdgcfjbbpaeojofohoefgiehjai');
-  const isPDF = window.location.href.endsWith('.pdf') || 
-                window.location.href.includes('.pdf#') ||
-                document.contentType === 'application/pdf' ||
-                isChromePDF;
-  
-  // Check if we're on a PDF page (Chrome's PDF viewer)
-  if (isPDF && mode === 'AGENTIC') {
-    const pdfMsg = isChromePDF 
-      ? 'PDF files opened in Chrome\'s PDF viewer cannot be analyzed. Chrome extensions cannot access PDF content. Please find the HTML version or use a PDF-to-HTML converter.'
-      : 'PDF files cannot be analyzed directly. Please use the HTML version of the document.';
-    showError(pdfMsg);
-    return;
-  }
-  
-  // Only clear selection if not preserving it (for manual mode)
-  if (!options.preserveSelection) {
-    if (window.getSelection) {
-      const selection = window.getSelection();
-      if (selection.rangeCount > 0) {
-        selection.removeAllRanges();
-      }
-    }
-  }
-  
-  // Check if body exists (might not exist on SVG file pages)
-  if (!document.body) {
-    console.error('[Content] Cannot show sidebar: document.body is null');
-    return;
-  }
-
-  // Reset state
-  isSidebarOpen = false;
-  currentMode = null;
-
-  // Now create new sidebar using Shadow DOM
-  currentMode = mode;
-  isSidebarOpen = true;
-
-  // Create sidebar with Shadow DOM (CRITICAL for CSS isolation)
-  sidebarShadow = createSidebar(mode, options);
-  sidebar = sidebarShadow.querySelector('#paperlens-sidebar');
-  
-  // Store initial width
-  sidebar._lastWidth = 420;
-  sidebar._isCollapsed = false;
-  
-  // Apply webpage shifting (same universal approach as before)
-  const sidebarWidth = 420;
-  applyWebpageShifting(sidebarWidth);
-
-  // Re-apply shifting on window resize for responsive behavior
-  sidebar._windowResizeHandler = () => {
-    const width = sidebar._isCollapsed ? 48 : (sidebar._lastWidth || 420);
-    applyWebpageShifting(width);
-  };
-  window.addEventListener('resize', sidebar._windowResizeHandler, { passive: true });
-
-  // Close button handler (use shadow root)
-  const closeBtn = sidebarShadow.querySelector('#pl-close-btn');
-  if (closeBtn) {
-    closeBtn.addEventListener('click', closeSidebar);
-  }
-
-  // Collapse/Expand button handler (use shadow root)
-  const collapseBtn = sidebarShadow.querySelector('#pl-collapse-btn');
-  if (collapseBtn) {
-    collapseBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      toggleSidebarCollapse();
-    });
-  }
-  
-  // Add resize handle for left-right resizing
-  addResizeHandle(sidebar, sidebarHost);
-}
-
-/**
- * Apply webpage shifting (universal approach)
+ * Apply webpage shifting
  */
 function applyWebpageShifting(sidebarWidth) {
   const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
   const minContentWidth = 720;
   const shouldOverlay = viewportWidth > 0 && (viewportWidth - sidebarWidth < minContentWidth);
 
-  // Store original inline styles once for restoration
   if (sidebar && !sidebar._originalStylesStored) {
     sidebar._originalStylesStored = true;
     sidebar._originalBodyMarginRight = document.body?.style.marginRight || '';
-    sidebar._originalBodyWidth = document.body?.style.width || '';
-    sidebar._originalBodyMaxWidth = document.body?.style.maxWidth || '';
-    sidebar._originalBodyOverflowX = document.body?.style.overflowX || '';
-    sidebar._originalBodyBoxSizing = document.body?.style.boxSizing || '';
     sidebar._originalBodyPaddingRight = document.body?.style.paddingRight || '';
-
-    sidebar._originalHtmlMarginRight = document.documentElement?.style.marginRight || '';
-    sidebar._originalHtmlWidth = document.documentElement?.style.width || '';
-    sidebar._originalHtmlMaxWidth = document.documentElement?.style.maxWidth || '';
-    sidebar._originalHtmlOverflowX = document.documentElement?.style.overflowX || '';
-    sidebar._originalHtmlBoxSizing = document.documentElement?.style.boxSizing || '';
-    sidebar._originalHtmlPaddingRight = document.documentElement?.style.paddingRight || '';
+    sidebar._originalBodyBoxSizing = document.body?.style.boxSizing || '';
+    sidebar._originalBodyOverflowX = document.body?.style.overflowX || '';
   }
 
-  // Update or create stylesheet
   let styleSheet = document.getElementById('paperlens-global-shift-styles');
   if (!styleSheet) {
     styleSheet = document.createElement('style');
     styleSheet.id = 'paperlens-global-shift-styles';
     document.head.appendChild(styleSheet);
   }
-  
+
   styleSheet.textContent = `
     body.paperlens-sidebar-open {
       padding-right: var(--paperlens-sidebar-width) !important;
       box-sizing: border-box !important;
       overflow-x: hidden !important;
-      scrollbar-gutter: stable;
     }
     body.paperlens-sidebar-open.paperlens-sidebar-overlay {
       padding-right: 0 !important;
     }
     html.paperlens-sidebar-open {
-      padding-right: var(--paperlens-sidebar-width) !important;
       overflow-x: hidden !important;
-      scrollbar-gutter: stable;
-    }
-    html.paperlens-sidebar-open.paperlens-sidebar-overlay {
-      padding-right: 0 !important;
     }
   `;
-  
+
   document.documentElement.style.setProperty('--paperlens-sidebar-width', `${sidebarWidth}px`);
   document.body.classList.add('paperlens-sidebar-open');
   document.documentElement.classList.add('paperlens-sidebar-open');
   document.body.classList.toggle('paperlens-sidebar-overlay', shouldOverlay);
   document.documentElement.classList.toggle('paperlens-sidebar-overlay', shouldOverlay);
-  
-  document.body.style.setProperty('padding-right', shouldOverlay ? '0px' : `${sidebarWidth}px`, 'important');
+
+  if (!shouldOverlay) {
+    document.body.style.setProperty('padding-right', `${sidebarWidth}px`, 'important');
+  } else {
+    document.body.style.removeProperty('padding-right');
+  }
   document.body.style.setProperty('box-sizing', 'border-box', 'important');
   document.body.style.setProperty('overflow-x', 'hidden', 'important');
-  
-  document.documentElement.style.setProperty('padding-right', shouldOverlay ? '0px' : `${sidebarWidth}px`, 'important');
-  document.documentElement.style.setProperty('overflow-x', 'hidden', 'important');
 }
 
 /**
- * Add resize handle to sidebar (Shadow DOM version)
+ * Add resize handle
  */
 function addResizeHandle(sidebarElement, hostElement) {
-  if (!sidebarElement || !hostElement) {
-    console.warn('[Content] Cannot add resize handle: sidebar or host element is null');
-    return;
-  }
-
-  // Create resize handle inside shadow root
   const resizeHandle = document.createElement('div');
-  resizeHandle.style.cssText = `
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: 4px;
-    cursor: ew-resize;
-    z-index: 10000;
-    background: transparent;
-    transition: background 0.2s;
-  `;
-  
-  resizeHandle.addEventListener('mouseenter', () => {
-    resizeHandle.style.background = '#6366f1';
-    resizeHandle.style.opacity = '0.5';
-  });
-  
-  resizeHandle.addEventListener('mouseleave', () => {
-    resizeHandle.style.background = 'transparent';
-    resizeHandle.style.opacity = '1';
-  });
+  resizeHandle.className = 'pl-resize-handle';
 
   let isResizing = false;
   let startX = 0;
   let startWidth = 0;
 
   resizeHandle.addEventListener('mousedown', (e) => {
-    if (!hostElement) return;
     isResizing = true;
     startX = e.clientX;
     startWidth = parseInt(getComputedStyle(hostElement).width) || 420;
-    if (document.body) {
-      document.body.style.cursor = 'ew-resize';
-      document.body.style.userSelect = 'none';
-    }
+    document.body.style.userSelect = 'none';
     e.preventDefault();
-    e.stopPropagation();
   });
 
   const handleMouseMove = (e) => {
-    if (!isResizing || !hostElement) return;
-    
-    // Don't resize if collapsed
-    if (sidebarElement._isCollapsed) return;
-    
-    const diff = startX - e.clientX; // Inverted because sidebar is on right
-    const newWidth = Math.max(300, Math.min(800, startWidth + diff));
-    
-    // Update host element width (this controls the sidebar width)
+    if (!isResizing) return;
+    const diff = startX - e.clientX;
+    const newWidth = Math.max(320, Math.min(700, startWidth + diff));
     hostElement.style.width = `${newWidth}px`;
-    sidebarElement._lastWidth = newWidth;
-    
-    // Update webpage shifting
+    if (sidebar) sidebar._lastWidth = newWidth;
     applyWebpageShifting(newWidth);
   };
 
   const handleMouseUp = () => {
     if (isResizing) {
       isResizing = false;
-      if (document.body) {
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-      }
+      document.body.style.userSelect = '';
     }
   };
 
   document.addEventListener('mousemove', handleMouseMove);
   document.addEventListener('mouseup', handleMouseUp);
 
-  // Store cleanup function
   resizeHandle._cleanup = () => {
     document.removeEventListener('mousemove', handleMouseMove);
     document.removeEventListener('mouseup', handleMouseUp);
   };
 
-  // Append to sidebar element (inside shadow root)
   try {
     sidebarElement.appendChild(resizeHandle);
     sidebarElement._resizeHandle = resizeHandle;
@@ -1291,28 +1011,23 @@ function addResizeHandle(sidebarElement, hostElement) {
 }
 
 /**
- * Toggle sidebar collapse/expand
+ * Toggle sidebar collapse
  */
 function toggleSidebarCollapse() {
   if (!sidebar || !sidebarHost) return;
-  
   sidebar._isCollapsed = !sidebar._isCollapsed;
   const collapseBtn = sidebarShadow.querySelector('#pl-collapse-btn');
-  
+
   if (sidebar._isCollapsed) {
     sidebar.classList.add('pl-collapsed');
     sidebarHost.style.width = '48px';
-    if (collapseBtn) {
-      collapseBtn.textContent = '▶';
-    }
+    if (collapseBtn) collapseBtn.textContent = '▶';
     applyWebpageShifting(48);
   } else {
     sidebar.classList.remove('pl-collapsed');
     const restoredWidth = sidebar._lastWidth || 420;
     sidebarHost.style.width = `${restoredWidth}px`;
-    if (collapseBtn) {
-      collapseBtn.textContent = '◀';
-    }
+    if (collapseBtn) collapseBtn.textContent = '◀';
     applyWebpageShifting(restoredWidth);
   }
 }
@@ -1321,1003 +1036,781 @@ function toggleSidebarCollapse() {
  * Close sidebar
  */
 function closeSidebar() {
-  // Clean up resize handle
   if (sidebar && sidebar._resizeHandle && sidebar._resizeHandle._cleanup) {
     sidebar._resizeHandle._cleanup();
   }
-
   if (sidebar && sidebar._windowResizeHandler) {
     window.removeEventListener('resize', sidebar._windowResizeHandler);
-    sidebar._windowResizeHandler = null;
   }
-  
-  if (sidebarHost) {
-    sidebarHost.remove();
-  }
-  
+  if (sidebarHost) sidebarHost.remove();
+
   sidebarHost = null;
   sidebarShadow = null;
   sidebar = null;
   isSidebarOpen = false;
   currentMode = null;
-  
-  // Remove CSS classes and stylesheet
-  document.body.classList.remove('paperlens-sidebar-open');
-  document.documentElement.classList.remove('paperlens-sidebar-open');
-  document.body.classList.remove('paperlens-sidebar-overlay');
-  document.documentElement.classList.remove('paperlens-sidebar-overlay');
+  noContentShown = false;
+
+  document.body.classList.remove('paperlens-sidebar-open', 'paperlens-sidebar-overlay');
+  document.documentElement.classList.remove('paperlens-sidebar-open', 'paperlens-sidebar-overlay');
+
   const closeStyleSheet = document.getElementById('paperlens-global-shift-styles');
-  if (closeStyleSheet) {
-    closeStyleSheet.remove();
-  }
-  
-  // Disconnect mutation observer
+  if (closeStyleSheet) closeStyleSheet.remove();
+
   if (window.paperlensMutationObserver) {
     window.paperlensMutationObserver.disconnect();
     window.paperlensMutationObserver = null;
   }
-  
-  // Restore body styles
-  if (document.body) {
-    // Remove inline styles set via setProperty
-    document.body.style.removeProperty('margin-right');
-    document.body.style.removeProperty('padding-right');
-    document.body.style.removeProperty('width');
-    document.body.style.removeProperty('max-width');
-    document.body.style.removeProperty('box-sizing');
-    document.body.style.removeProperty('overflow-x');
-    
-    // Restore original values if they existed
-    if (sidebar._originalBodyMarginRight) document.body.style.marginRight = sidebar._originalBodyMarginRight;
-    if (sidebar._originalBodyPaddingRight) document.body.style.paddingRight = sidebar._originalBodyPaddingRight;
-    if (sidebar._originalBodyWidth) document.body.style.width = sidebar._originalBodyWidth;
-    if (sidebar._originalBodyMaxWidth) document.body.style.maxWidth = sidebar._originalBodyMaxWidth;
-    if (sidebar._originalBodyOverflowX) document.body.style.overflowX = sidebar._originalBodyOverflowX;
-    if (sidebar._originalBodyBoxSizing) document.body.style.boxSizing = sidebar._originalBodyBoxSizing;
-  }
-  
-  // Restore html styles
-  if (document.documentElement) {
-    document.documentElement.style.removeProperty('margin-right');
-    document.documentElement.style.removeProperty('padding-right');
-    document.documentElement.style.removeProperty('width');
-    document.documentElement.style.removeProperty('max-width');
-    document.documentElement.style.removeProperty('overflow-x');
-    
-    if (sidebar._originalHtmlMarginRight) document.documentElement.style.marginRight = sidebar._originalHtmlMarginRight;
-    if (sidebar._originalHtmlPaddingRight) document.documentElement.style.paddingRight = sidebar._originalHtmlPaddingRight;
-    if (sidebar._originalHtmlWidth) document.documentElement.style.width = sidebar._originalHtmlWidth;
-    if (sidebar._originalHtmlMaxWidth) document.documentElement.style.maxWidth = sidebar._originalHtmlMaxWidth;
-    if (sidebar._originalHtmlOverflowX) document.documentElement.style.overflowX = sidebar._originalHtmlOverflowX;
-    if (sidebar._originalHtmlBoxSizing) document.documentElement.style.boxSizing = sidebar._originalHtmlBoxSizing;
-    document.documentElement.style.removeProperty('--paperlens-sidebar-width');
-  }
-  
-  // CSS injection handles container restoration automatically via class removal
-  // No need to manually restore containers
 
-  setTimeout(() => {
-    if (sidebar) {
-      // Remove highlight if it exists
-      if (sidebar._highlightSpan) {
-        try {
-          const highlightSpan = sidebar._highlightSpan;
-          const parent = highlightSpan.parentNode;
-          if (parent) {
-            // Replace highlight span with its text content
-            const textNode = document.createTextNode(highlightSpan.textContent);
-            parent.replaceChild(textNode, highlightSpan);
-            parent.normalize();
-          }
-        } catch (error) {
-          console.log('[Content] Error removing highlight:', error);
-        }
-      }
-      
-      // Clean up resize observer
-      if (sidebar._resizeObserver) {
-        sidebar._resizeObserver.disconnect();
-        sidebar._resizeObserver = null;
-      }
-      // Clean up resize handle listeners
-      const resizeHandle = sidebar.querySelector('.paperlens-resize-handle');
-      if (resizeHandle && resizeHandle._cleanup) {
-        resizeHandle._cleanup();
-      }
-      sidebar.remove();
-      sidebar = null;
-    }
-    // Always reset state
-    isSidebarOpen = false;
-    currentMode = null;
-  }, 300);
+  document.body.style.removeProperty('padding-right');
+  document.body.style.removeProperty('box-sizing');
+  document.body.style.removeProperty('overflow-x');
 }
 
 /**
- * Show error message
- * @param {string} message - Error message
+ * Show sidebar
  */
-function showError(message) {
-  console.log('[Content] showError called with message:', message);
-  
-  // Remove any existing error toast
-  const existingToast = document.getElementById('paperlens-error-toast');
-  if (existingToast) {
-    console.log('[Content] Removing existing error toast');
-    existingToast.remove();
-  }
-  
-  // Calculate sidebar width dynamically
-  const sidebarElement = document.getElementById('paperlens-sidebar');
-  const sidebarWidth = sidebarElement ? parseInt(getComputedStyle(sidebarElement).width) || 420 : 420;
-  const isCollapsed = sidebarElement && sidebarElement.classList.contains('paperlens-collapsed');
-  const effectiveSidebarWidth = isCollapsed ? 40 : sidebarWidth;
-  
-  console.log('[Content] Sidebar width:', sidebarWidth, 'Collapsed:', isCollapsed, 'Effective width:', effectiveSidebarWidth);
-  
-  // Create error toast
-  const toast = document.createElement('div');
-  toast.id = 'paperlens-error-toast';
-  toast.className = 'paperlens-error-toast';
-  toast.textContent = message;
-  
-  // Apply ALL styles inline to ensure they work (override any conflicting styles)
-  Object.assign(toast.style, {
-    position: 'fixed',
-    bottom: '20px',
-    right: `${effectiveSidebarWidth}px`,
-    background: '#2a1a1a',
-    border: '1px solid #cf6679',
-    color: '#e8e8f0',
-    padding: '12px 16px',
-    borderRadius: '8px',
-    fontSize: '13px',
-    maxWidth: '280px',
-    minWidth: '200px',
-    zIndex: '999999',
-    boxShadow: '0 4px 12px rgba(0, 0, 0, 0.4)',
-    opacity: '0',
-    transform: 'translateY(20px)',
-    transition: 'opacity 0.3s ease, transform 0.3s ease, right 0.3s ease',
-    cursor: 'pointer',
-    wordWrap: 'break-word',
-    wordBreak: 'break-word',
-    lineHeight: '1.4',
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", "Roboto", sans-serif',
-    pointerEvents: 'auto',
-    display: 'block',
-    visibility: 'visible',
-    boxSizing: 'border-box',
-  });
-  
-  // Append to body
-  if (!document.body) {
-    console.error('[Content] Cannot show error toast: document.body is null');
+function showSidebar(mode, options = {}) {
+  const isChromePDF = window.location.protocol === 'chrome-extension:' &&
+    window.location.hostname.includes('mhjfbmdgcfjbbpaeojofohoefgiehjai');
+  const isPDF = window.location.href.endsWith('.pdf') ||
+    window.location.href.includes('.pdf#') ||
+    document.contentType === 'application/pdf' ||
+    isChromePDF;
+
+  if (isPDF && mode === 'AGENTIC') {
+    const pdfMsg = isChromePDF
+      ? 'PDF files opened in Chrome\'s PDF viewer cannot be analyzed. Chrome extensions cannot access PDF content. Please find the HTML version or use a PDF-to-HTML converter.'
+      : 'PDF files cannot be analyzed directly. Please use the HTML version of the document.';
+    showError(pdfMsg);
     return;
   }
-  
-  document.body.appendChild(toast);
-  console.log('[Content] Error toast appended to body, right position:', toast.style.right);
-  
-  // Force a reflow to ensure styles are applied
-  toast.offsetHeight;
-  
-  // Animate in
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      toast.style.opacity = '1';
-      toast.style.transform = 'translateY(0)';
-      console.log('[Content] Error toast animated in, opacity:', toast.style.opacity);
-    });
-  });
-  
-  // Update position when sidebar resizes
-  const updateToastPosition = () => {
-    const currentSidebar = document.getElementById('paperlens-sidebar');
-    if (currentSidebar && toast.parentNode) {
-      const currentWidth = parseInt(getComputedStyle(currentSidebar).width) || 420;
-      const currentCollapsed = currentSidebar.classList.contains('paperlens-collapsed');
-      const currentEffectiveWidth = currentCollapsed ? 40 : currentWidth;
-      toast.style.right = `${currentEffectiveWidth}px`;
-      console.log('[Content] Toast position updated, right:', toast.style.right);
-    }
+
+  if (!options.preserveSelection) {
+    window.getSelection()?.removeAllRanges();
+  }
+
+  if (!document.body) {
+    console.error('[Content] Cannot show sidebar: document.body is null');
+    return;
+  }
+
+  isSidebarOpen = false;
+  currentMode = null;
+  noContentShown = false;
+
+  currentMode = mode;
+  isSidebarOpen = true;
+
+  sidebarShadow = createSidebar(mode, options);
+  sidebar = sidebarShadow.querySelector('#paperlens-sidebar');
+
+  sidebar._lastWidth = 420;
+  sidebar._isCollapsed = false;
+
+  applyWebpageShifting(420);
+
+  sidebar._windowResizeHandler = () => {
+    const width = sidebar._isCollapsed ? 48 : (sidebar._lastWidth || 420);
+    applyWebpageShifting(width);
   };
-  
-  // Listen for sidebar resize
-  if (sidebarElement) {
-    const resizeObserver = new ResizeObserver(updateToastPosition);
-    resizeObserver.observe(sidebarElement);
-    toast._resizeObserver = resizeObserver;
-  }
-  
-  // Also listen for collapse/expand
-  if (sidebarElement) {
-    const collapseObserver = new MutationObserver(() => {
-      updateToastPosition();
-    });
-    collapseObserver.observe(sidebarElement, {
-      attributes: true,
-      attributeFilter: ['class'],
-    });
-    toast._collapseObserver = collapseObserver;
-  }
-  
-  // Auto-dismiss after 5 seconds
-  const dismissTimeout = setTimeout(() => {
-    console.log('[Content] Auto-dismissing error toast after 5 seconds');
-    toast.style.opacity = '0';
-    toast.style.transform = 'translateY(20px)';
-    setTimeout(() => {
-      if (toast._resizeObserver) {
-        toast._resizeObserver.disconnect();
-      }
-      if (toast._collapseObserver) {
-        toast._collapseObserver.disconnect();
-      }
-      if (toast.parentNode) {
-        toast.remove();
-      }
-    }, 300);
-  }, 5000);
-  
-  // Also allow manual dismiss on click
-  toast.addEventListener('click', () => {
-    console.log('[Content] Error toast clicked, dismissing');
-    clearTimeout(dismissTimeout);
-    toast.style.opacity = '0';
-    toast.style.transform = 'translateY(20px)';
-    setTimeout(() => {
-      if (toast._resizeObserver) {
-        toast._resizeObserver.disconnect();
-      }
-      if (toast._collapseObserver) {
-        toast._collapseObserver.disconnect();
-      }
-      if (toast.parentNode) {
-        toast.remove();
-      }
-    }, 300);
-  });
-  
-  // Hover effect
-  toast.addEventListener('mouseenter', () => {
-    toast.style.background = '#331f1f';
-  });
-  toast.addEventListener('mouseleave', () => {
-    toast.style.background = '#2a1a1a';
-  });
-  
-  // Log final state
-  setTimeout(() => {
-    const rect = toast.getBoundingClientRect();
-    console.log('[Content] Error toast final state:', {
-      visible: toast.offsetParent !== null,
-      right: toast.style.right,
-      bottom: toast.style.bottom,
-      opacity: toast.style.opacity,
-      rect: { top: rect.top, right: rect.right, bottom: rect.bottom, left: rect.left },
-    });
-  }, 100);
-}
+  window.addEventListener('resize', sidebar._windowResizeHandler, { passive: true });
 
-/**
- * Handle manual highlight mode
- */
-function handleManualHighlight() {
-  console.log('[Content] Setting up manual highlight handler');
-  
-  let selectionTimeout = null;
-  let ctrlAPressed = false;
-  let ctrlAPressTime = 0;
-  
-  // Track Ctrl+A keypress to distinguish from manual large selections
-  document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'a' && !e.shiftKey) {
-      ctrlAPressed = true;
-      ctrlAPressTime = Date.now();
-      // Reset after 500ms - if user doesn't press Ctrl+Shift+A, allow manual selection
-      setTimeout(() => {
-        if (Date.now() - ctrlAPressTime > 400) {
-          ctrlAPressed = false;
-        }
-      }, 500);
-    }
-  });
-  
-  // Use a single event listener that checks state each time
-  document.addEventListener('mouseup', (e) => {
-    console.log('[Content] Mouseup event detected');
-    // Don't show button if sidebar is open or if click was in sidebar
-    if (isSidebarOpen) {
-      console.log('[Content] Sidebar is open, skipping visualize button');
-      return;
-    }
-    
-    // Don't show button if click was inside sidebar
-    if (e.target.closest('#paperlens-sidebar')) {
-      console.log('[Content] Click was inside sidebar, skipping');
-      return;
-    }
+  const closeBtn = sidebarShadow.querySelector('#pl-close-btn');
+  if (closeBtn) closeBtn.addEventListener('click', closeSidebar);
 
-    // Clear any existing timeout and visualize button
-    if (selectionTimeout) {
-      clearTimeout(selectionTimeout);
-    }
-    
-    // Remove any existing visualize button when starting a new selection
-    const existingBtn = document.getElementById('paperlens-visualize-btn');
-    if (existingBtn) {
-      existingBtn.remove();
-    }
-
-    const selection = window.getSelection();
-    if (!selection) {
-      console.log('[Content] No selection object available');
-      return;
-    }
-    
-    const text = selection.toString().trim();
-    console.log('[Content] Selection detected, text length:', text.length);
-
-    // Only process if there's actual selected text
-    if (text.length === 0) {
-      console.log('[Content] No text selected');
-      return;
-    }
-
-    // Check if Ctrl+A was just pressed (within last 200ms)
-    const wasCtrlA = ctrlAPressed && (Date.now() - ctrlAPressTime < 200);
-    
-    // Wait a bit to check if Ctrl+Shift+A was pressed (Ctrl+Shift+A handler runs first)
-    selectionTimeout = setTimeout(() => {
-      // Check again if sidebar opened during delay
-      if (isSidebarOpen) {
-        return;
-      }
-
-      const newSelection = window.getSelection();
-      if (!newSelection || newSelection.rangeCount === 0) {
-        return;
-      }
-
-      const newText = newSelection.toString().trim();
-      
-      // If no text selected, don't show button
-      if (newText.length === 0) {
-        return;
-      }
-
-      // Exclude sidebar content from selection check
-      const sidebar = document.getElementById('paperlens-sidebar');
-      if (sidebar) {
-        const sidebarText = sidebar.innerText.trim();
-        // If selection includes sidebar text, it's not a valid selection
-        if (sidebarText && newText.includes(sidebarText) && newText.length > sidebarText.length * 0.5) {
-          return;
-        }
-      }
-
-      // Check if selection is in sidebar
-      try {
-        const range = newSelection.getRangeAt(0);
-        const sidebarElement = document.getElementById('paperlens-sidebar');
-        if (sidebarElement && sidebarElement.contains(range.commonAncestorContainer)) {
-          return; // Selection is in sidebar, ignore
-        }
-      } catch (error) {
-        // Range might be invalid
-        return;
-      }
-
-      // Only suppress if it was actually Ctrl+A (keyboard shortcut)
-      // For ALL mouse-based selections (small or large), show the visualize button
-      if (wasCtrlA) {
-        // This was Ctrl+A - don't show visualize button, let Ctrl+Shift+A handle it if needed
-        ctrlAPressed = false; // Reset flag
-        return;
-      }
-
-      // For ANY manual selection (mouse drag) >= 15 chars, show visualize button
-      // Works for ANY selection size - small portions, large portions, full page manual selection
-      if (newText.length >= 15) {
-        try {
-          const range = newSelection.getRangeAt(0);
-          if (!range) {
-            console.error('[Content] No range available from selection');
-            return;
-          }
-          
-          console.log('[Content] Showing visualize button for selection:', {
-            textLength: newText.length,
-            textPreview: newText.substring(0, 50),
-            rangeValid: !!range,
-            url: window.location.href,
-            site: window.location.hostname,
-            protocol: window.location.protocol
-          });
-          
-          showVisualizeButton(range);
-        } catch (error) {
-          console.error('[Content] Error showing visualize button:', error);
-          console.error('[Content] Error stack:', error.stack);
-          console.error('[Content] Error stack:', error.stack);
-        }
-      } else {
-        console.log('[Content] Selection too short:', newText.length, '(minimum: 15)');
-      }
-    }, 150); // Delay to let Ctrl+Shift+A handler run first
-  });
-  
-  console.log('[Content] Manual highlight handler setup complete');
-}
-
-/**
- * Handle agentic mode (Ctrl+Shift+A)
- */
-function handleAgenticMode() {
-  document.addEventListener('keydown', async (e) => {
-    // Check for Ctrl+Shift+A (or Cmd+Shift+A on Mac)
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'A') {
-      e.preventDefault();
+  const collapseBtn = sidebarShadow.querySelector('#pl-collapse-btn');
+  if (collapseBtn) {
+    collapseBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      toggleSidebarCollapse();
+    });
+  }
 
-      // Clear selection immediately to prevent it from interfering
-      if (window.getSelection) {
-        const sel = window.getSelection();
-        if (sel.rangeCount > 0) {
-          sel.removeAllRanges();
-        }
-      }
-
-      // Wait a bit for any pending selection events to complete
-      setTimeout(async () => {
-        // Don't trigger if sidebar is already open (user might be typing in sidebar)
-        if (isSidebarOpen) {
-          return;
-        }
-
-        // Agentic mode - analyze entire page/paper
-        // Always trigger on Ctrl+Shift+A regardless of selection
-        showSidebar('AGENTIC');
-
-        // Clear selection before showing sidebar
-        if (window.getSelection) {
-          const sel = window.getSelection();
-          if (sel.rangeCount > 0) {
-            sel.removeAllRanges();
-          }
-        }
-
-        // Show banner
-        const banner = document.createElement('div');
-        banner.id = 'paperlens-banner';
-        banner.className = 'paperlens-banner';
-        banner.textContent = '✦ PaperLens is analyzing this paper...';
-        document.body.insertBefore(banner, document.body.firstChild);
-
-        // Extract paper structure
-        // Note: scraper.js defines window.extractPaperStructure()
-        try {
-          const paperData = window.extractPaperStructure ? window.extractPaperStructure() : extractPaperStructure();
-
-          if (paperData.isPDF) {
-            const pdfMsg = paperData.pdfType === 'chrome-viewer' 
-              ? 'PDF files opened in Chrome\'s PDF viewer cannot be analyzed. Chrome extensions cannot access PDF content. Please find the HTML version or use a PDF-to-HTML converter.'
-              : 'PDF files cannot be analyzed directly. Please use the HTML version of the document.';
-            showError(pdfMsg);
-            banner.remove();
-            return;
-          }
-
-          // Update sidebar with paper title
-          const titleEl = querySidebar('#pl-paper-title');
-          if (titleEl) {
-            titleEl.textContent = paperData.title || 'Research Paper';
-            titleEl.style.display = 'block';
-          }
-
-          // Ping background
-          const pinged = await pingBackground();
-          if (!pinged) {
-            showError('PaperLens service unavailable. Please try again.');
-            banner.remove();
-            return;
-          }
-
-          // Send analyze request
-          try {
-            chrome.runtime.sendMessage({
-              type: 'ANALYZE_PAPER',
-              paperData,
-            });
-          } catch (error) {
-            console.error('[Content] Error sending analyze message:', error);
-            showError('Failed to analyze paper');
-            banner.remove();
-          }
-        } catch (error) {
-          console.error('[Content] Error extracting paper:', error);
-          showError('Failed to extract paper structure: ' + error.message);
-          banner.remove();
-        }
-      }, 300);
-    }
-  });
+  addResizeHandle(sidebar, sidebarHost);
 }
 
 /**
- * Handle messages from background script and popup
+ * Create a section card
  */
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // Handle TRIGGER_ANALYZE from popup
-  if (message.type === 'TRIGGER_ANALYZE') {
-    // Trigger the agentic mode directly (same as Ctrl+Shift+A)
-    (async () => {
-      // Don't trigger if sidebar is already open
-      if (isSidebarOpen) {
-        sendResponse({ success: false, message: 'Sidebar already open' });
-        return;
-      }
+function createSectionCard(sectionId, heading, diagramType) {
+  const card = document.createElement('div');
+  card.className = 'pl-card';
+  card.id = `pl-card-${sectionId}`;
 
-      // Clear selection when triggered from popup
-      if (window.getSelection) {
-        const selection = window.getSelection();
-        if (selection.rangeCount > 0) {
-          selection.removeAllRanges();
-        }
-      }
+  const typeLabels = {
+    flowchart: 'Flow',
+    mindmap: 'Mind Map',
+    timeline: 'Timeline',
+    comparison: 'Compare',
+  };
 
-      const selection = window.getSelection();
-      const text = selection.toString().trim();
-      const pageText = document.body ? document.body.innerText.trim() : '';
+  card.innerHTML = `
+    <div class="pl-card-header">
+      <div class="pl-card-title" title="${escapeHtml(heading)}">${escapeHtml(heading)}</div>
+      <div class="pl-card-meta">
+        ${diagramType ? `<span class="pl-card-type">${typeLabels[diagramType] || diagramType}</span>` : ''}
+      </div>
+    </div>
+    <div class="pl-card-body" id="pl-body-${sectionId}">
+      <div class="pl-timer" id="pl-timer-${sectionId}">Generating…</div>
+      <div class="pl-skeleton"></div>
+    </div>
+  `;
 
-      // Check if selection covers >80% of page or trigger anyway (including empty selection on large pages)
-      // Works on ANY webpage - no restrictions
-      // PaperLens can analyze any content: research papers, ChatGPT conversations, 
-      // search results, blog posts, articles, etc.
-      if (!pageText || text.length > pageText.length * 0.8 || text.length > 10000 || (pageText.length > 200 && text.length === 0)) {
-        // Clear selection before showing sidebar
-        if (window.getSelection) {
-          const sel = window.getSelection();
-          if (sel.rangeCount > 0) {
-            sel.removeAllRanges();
-          }
-        }
+  return card;
+}
 
-        // Agentic mode - analyze entire page/paper
-        showSidebar('AGENTIC');
+/**
+ * Start card timer
+ */
+function startCardTimer(sectionId) {
+  const timerEl = querySidebar(`#pl-timer-${sectionId}`);
+  if (!timerEl) return null;
 
-        // Show banner
-        const banner = document.createElement('div');
-        banner.id = 'paperlens-banner';
-        banner.className = 'paperlens-banner';
-        banner.textContent = '✦ PaperLens is analyzing this paper...';
-        document.body.insertBefore(banner, document.body.firstChild);
-
-        // Extract paper structure
-        try {
-          const paperData = window.extractPaperStructure ? window.extractPaperStructure() : extractPaperStructure();
-
-          if (paperData.isPDF) {
-            const pdfMsg = paperData.pdfType === 'chrome-viewer' 
-              ? 'PDF files opened in Chrome\'s PDF viewer cannot be analyzed. Chrome extensions cannot access PDF content. Please find the HTML version or use a PDF-to-HTML converter.'
-              : 'PDF files cannot be analyzed directly. Please use the HTML version of the document.';
-            showError(pdfMsg);
-            banner.remove();
-            return;
-          }
-
-          // Update sidebar with paper title
-          const titleEl = querySidebar('#pl-paper-title');
-          if (titleEl) {
-            titleEl.textContent = paperData.title || 'Research Paper';
-            titleEl.style.display = 'block';
-          }
-
-          // Ping background
-          const pinged = await pingBackground();
-          if (!pinged) {
-            showError('PaperLens service unavailable. Please try again.');
-            banner.remove();
-            return;
-          }
-
-          // Send analyze request
-          try {
-            chrome.runtime.sendMessage({
-              type: 'ANALYZE_PAPER',
-              paperData,
-            });
-          } catch (error) {
-            console.error('[Content] Error sending analyze message:', error);
-            showError('Failed to analyze paper');
-            banner.remove();
-          }
-        } catch (error) {
-          console.error('[Content] Error extracting paper:', error);
-          showError('Failed to extract paper structure: ' + error.message);
-          banner.remove();
-        }
-      }
-    })();
-    sendResponse({ success: true });
-    return true;
-  }
-  if (message.type === 'plan') {
-    if (!sidebarShadow) {
-      console.error('[Content] Plan received but sidebar shadow root not available');
-      return;
+  const startTime = Date.now();
+  const interval = setInterval(() => {
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    if (timerEl && timerEl.parentNode) {
+      timerEl.textContent = `Generating… ${elapsed}s`;
+    } else {
+      clearInterval(interval);
     }
-    
-    const plan = message.data || message.plan || [];
+  }, 1000);
+
+  return interval;
+}
+
+// =================== MESSAGE LISTENER ===================
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+
+  if (message.type === 'TRIGGER_ANALYZE') {
+    const evt = new CustomEvent('paperlens-trigger-agentic');
+    document.dispatchEvent(evt);
+  }
+
+  // ── 'plan' event: server sends the visualization plan ──────────────────────
+  if (message.type === 'plan') {
+    console.log('[PaperLens] plan received:', message.data?.length, 'sections, hasContent:', message.hasVisualizableContent);
+    if (!sidebarShadow) return;
+
+    const plan = message.data || [];
     const hasVisualizableContent = message.hasVisualizableContent !== false;
     const reason = message.reason || '';
-    const totalSections = plan.filter(p => !p.skip).length;
-    
-    console.log('[Content] Plan received:', {
-      hasVisualizableContent,
-      reason,
-      totalSections,
-      planItems: plan.map(p => ({ sectionId: p.sectionId, heading: p.heading, skip: p.skip })),
-    });
-    
-    // Remove empty state
+
     const emptyState = querySidebar('#pl-empty-state');
-    if (emptyState) {
-      emptyState.remove();
-    }
-    
-    // If no visualizable content, show message
-    if (!hasVisualizableContent || totalSections === 0) {
-      showNoContentMessage(reason || 'No visualizable content found on this page');
+    if (emptyState) emptyState.remove();
+
+    if (!hasVisualizableContent || plan.length === 0) {
+      showNoContentMessage(reason || 'No sections suitable for visualization were found.');
       return;
     }
-    
-    const progressText = querySidebar('#pl-progress-text');
-    const progressArea = querySidebar('#pl-progress-area');
-    if (progressText && totalSections > 0) {
-      progressText.textContent = `0 / ${totalSections} sections visualized`;
-    }
-    if (progressArea && totalSections > 0) {
-      progressArea.style.display = 'block';
-    }
 
-    // Create loading cards for each section
-    const cardsContainer = querySidebar('#pl-cards-container');
-    if (cardsContainer) {
-      plan.filter(p => !p.skip).forEach(planItem => {
-        console.log('[Content] Creating card for plan item:', planItem.sectionId, planItem.heading);
-        
-        const card = document.createElement('div');
-        card.className = 'pl-card';
-        card.id = `pl-card-${planItem.sectionId}`;
-        
-        const cardHeader = document.createElement('div');
-        cardHeader.className = 'pl-card-header';
-        
-        const cardTitle = document.createElement('div');
-        cardTitle.className = 'pl-card-title';
-        cardTitle.textContent = planItem.heading || planItem.sectionId;
-        cardHeader.appendChild(cardTitle);
-        
-        const cardBody = document.createElement('div');
-        cardBody.className = 'pl-card-body';
-        cardBody.id = `pl-body-${planItem.sectionId}`;
-        
-        // Loading skeleton
-        const skeleton = document.createElement('div');
-        skeleton.className = 'pl-skeleton';
-        cardBody.appendChild(skeleton);
-        
-        const loadingText = document.createElement('div');
-        loadingText.className = 'pl-loading-text';
-        loadingText.id = `pl-timer-${planItem.sectionId}`;
-        loadingText.textContent = 'Generating... 0s';
-        cardBody.appendChild(loadingText);
-        
-        card.appendChild(cardHeader);
-        card.appendChild(cardBody);
-        cardsContainer.appendChild(card);
-        
-        console.log('[Content] Card created with ID:', card.id);
-        
-        // Start elapsed timer
-        let secs = 0;
-        const timerInterval = setInterval(() => {
-          secs++;
-          const timerEl = querySidebar(`#pl-timer-${planItem.sectionId}`);
-          if (timerEl) {
-            timerEl.textContent = `Generating... ${secs}s`;
-          } else {
-            clearInterval(timerInterval);
-          }
-        }, 1000);
-        card.dataset.timerInterval = timerInterval;
-      });
-    }
+    const container = querySidebar('#pl-cards-container');
+    if (!container) return;
+
+    // Create a card for each planned section
+    plan.filter(p => !p.skip).forEach(planItem => {
+      const card = createSectionCard(planItem.sectionId, planItem.heading, planItem.diagramType);
+      container.appendChild(card);
+      const interval = startCardTimer(planItem.sectionId);
+      if (interval) card.dataset.timerInterval = interval;
+    });
 
     // Remove banner
     const banner = document.getElementById('paperlens-banner');
-    if (banner) {
-      banner.remove();
-    }
+    if (banner) banner.remove();
   }
 
+  // ── 'diagram' event: server sends a completed SVG ──────────────────────────
   if (message.type === 'diagram') {
-    if (!sidebarShadow) {
-      console.error('[Content] Diagram received but sidebar shadow root not available');
-      return;
-    }
-    
+    console.log('[PaperLens] diagram received for:', message.sectionId, 'svg length:', message.svg?.length);
+    if (!sidebarShadow) return;
+
     const { sectionId, svg, heading } = message;
-    
-    console.log('[Content] Diagram received for section:', sectionId, {
-      hasSvg: !!svg,
-      svgLength: svg ? svg.length : 0,
-      heading: heading || 'N/A',
-    });
-    
-    // Parse section ID
-    // Segment IDs come from executor as: `${planItem.sectionId}-${segment.id}`
-    // Where segment.id is like "segment-1" or "segment-0"
-    // So full ID is like: "section-0-segment-1" or "chunk-0-segment-1"
-    let baseSectionId = sectionId;
-    let segmentIdNum = null;
-    let isSegment = false;
-    
-    // Pattern: anything-segment-number (e.g., "section-0-segment-1", "chunk-0-segment-1")
-    const segmentMatch = sectionId.match(/^(.+?)-segment-(\d+)$/);
-    if (segmentMatch) {
-      baseSectionId = segmentMatch[1];
-      segmentIdNum = segmentMatch[2];
-      isSegment = true;
-      console.log('[Content] Detected segment:', { baseSectionId, segmentIdNum, fullId: sectionId });
-    }
-    
-    // Find card in shadow root - try exact match first
-    let card = querySidebar(`#pl-card-${baseSectionId}`);
-    
-    // If not found, try searching all cards
+
+    // The executor may send combined IDs like "section-0-segment-1"
+    // Try exact match first, then prefix match
+    let card = querySidebar(`#pl-card-${sectionId}`);
+    let cardBody = querySidebar(`#pl-body-${sectionId}`);
+
     if (!card) {
-      console.log('[Content] Card not found with exact ID, searching all cards...');
-      const allCards = querySidebarAll('.pl-card');
-      console.log('[Content] Available cards:', allCards.map(c => c.id));
-      
-      // Try to find by matching section ID patterns
-      for (const existingCard of allCards) {
-        const cardId = existingCard.id.replace(/^pl-card-/, '');
-        // Check if baseSectionId matches or is contained in card ID
-        if (cardId === baseSectionId || 
-            baseSectionId.includes(cardId) || 
-            cardId.includes(baseSectionId)) {
-          card = existingCard;
-          console.log('[Content] Found matching card by pattern:', card.id);
-          break;
+      // Try matching the base section ID (strip segment suffix)
+      const baseId = sectionId.replace(/-segment-\d+$/, '').replace(/-\d+$/, '');
+      card = querySidebar(`#pl-card-${baseId}`);
+      cardBody = querySidebar(`#pl-body-${baseId}`);
+
+      if (!card) {
+        // Create a new card on the fly (segment arrived without section_start)
+        const container = querySidebar('#pl-cards-container');
+        if (container) {
+          const newCard = createSectionCard(sectionId, heading || sectionId, null);
+          container.appendChild(newCard);
+          card = newCard;
+          cardBody = querySidebar(`#pl-body-${sectionId}`);
         }
       }
     }
-    
-    if (!card) {
-      console.error('[Content] Card not found for baseSectionId:', baseSectionId);
-      console.error('[Content] All available cards:', querySidebarAll('.pl-card').map(c => c.id));
-      return;
-    }
-    
-    console.log('[Content] Found card:', card.id, 'isSegment:', isSegment);
-    
-    if (isSegment) {
-      // This is a segment - create segment container if it doesn't exist
-      let segmentsContainer = card.querySelector('.pl-segments-container');
-      if (!segmentsContainer) {
-        console.log('[Content] Creating segments container for card:', card.id);
-        segmentsContainer = document.createElement('div');
-        segmentsContainer.className = 'pl-segments-container';
-        segmentsContainer.id = `pl-segments-${baseSectionId}`;
-        
-        // Clear the main card body first (remove loading skeleton and timer)
-        const mainCardBody = card.querySelector(`#pl-body-${baseSectionId}`);
-        if (mainCardBody) {
-          // Clear loading state
-          mainCardBody.innerHTML = '';
-        }
-        
-        // Clear timer if it exists
-        const timerEl = querySidebar(`#pl-timer-${baseSectionId}`);
-        if (timerEl) {
-          timerEl.remove();
-        }
-        const timerInterval = card.dataset.timerInterval;
-        if (timerInterval) {
-          clearInterval(parseInt(timerInterval));
-        }
-        
-        card.appendChild(segmentsContainer);
+
+    if (!cardBody) return;
+
+    // Clear timer
+    const timerId = card?.dataset.timerInterval;
+    if (timerId) clearInterval(parseInt(timerId));
+    const timerEl = cardBody.querySelector('.pl-timer') || querySidebar(`#pl-timer-${sectionId}`);
+    if (timerEl) timerEl.remove();
+
+    if (svg && svg.trim()) {
+      const cleanSvg = svg.replace(/<script[\s\S]*?<\/script>/gi, '');
+      cardBody.innerHTML = `<div class="napkin-visual-wrapper">${cleanSvg}</div>`;
+      const svgEl = cardBody.querySelector('svg');
+      if (svgEl) {
+        svgEl.style.width = '100%';
+        svgEl.style.height = 'auto';
+        svgEl.removeAttribute('width');
+        svgEl.removeAttribute('height');
       }
-      
-      // Check if this segment already exists (avoid duplicates)
-      const existingSegment = card.querySelector(`#pl-segment-${sectionId}`);
-      if (existingSegment) {
-        console.log('[Content] Segment already exists, updating:', sectionId);
-        const existingVisual = existingSegment.querySelector('.pl-segment-visual');
-        if (existingVisual && svg && svg.trim()) {
-          const cleanSvg = svg.replace(/<script[\s\S]*?<\/script>/gi, '');
-          existingVisual.innerHTML = `<div class="napkin-visual-wrapper">${cleanSvg}</div>`;
-          const svgEl = existingVisual.querySelector('svg');
-          if (svgEl) {
-            svgEl.style.width = '100%';
-            svgEl.style.height = 'auto';
-            svgEl.removeAttribute('width');
-            svgEl.removeAttribute('height');
-          }
-        }
-        setTimeout(updateProgress, 100);
-        return;
-      }
-      
-      // Create new segment div
-      const segmentDiv = document.createElement('div');
-      segmentDiv.className = 'pl-segment';
-      segmentDiv.id = `pl-segment-${sectionId}`;
-      
-      // Add segment heading
-      const segmentHeading = document.createElement('div');
-      segmentHeading.className = 'pl-segment-heading';
-      segmentHeading.textContent = heading || `Segment ${segmentIdNum}`;
-      segmentDiv.appendChild(segmentHeading);
-      
-      // Add visual container
-      const segmentVisual = document.createElement('div');
-      segmentVisual.className = 'pl-segment-visual';
-      segmentVisual.id = `pl-visual-${sectionId}`;
-      
-      // Render SVG in segment
-      if (svg && svg.trim()) {
-        const cleanSvg = svg.replace(/<script[\s\S]*?<\/script>/gi, '');
-        segmentVisual.innerHTML = `<div class="napkin-visual-wrapper">${cleanSvg}</div>`;
-        const svgEl = segmentVisual.querySelector('svg');
-        if (svgEl) {
-          svgEl.style.width = '100%';
-          svgEl.style.height = 'auto';
-          svgEl.removeAttribute('width');
-          svgEl.removeAttribute('height');
-        }
-        console.log('[Content] Segment SVG rendered:', sectionId, 'SVG length:', cleanSvg.length);
-      } else {
-        segmentVisual.innerHTML = '<div class="pl-error">Visual unavailable for this segment.</div>';
-        console.warn('[Content] Segment has no SVG:', sectionId);
-      }
-      
-      segmentDiv.appendChild(segmentVisual);
-      segmentsContainer.appendChild(segmentDiv);
-      
-      console.log('[Content] Segment visual rendered:', sectionId);
     } else {
-      // This is a main section visual (not a segment)
-      const cardBody = card.querySelector(`#pl-body-${baseSectionId}`);
-      if (!cardBody) {
-        console.error('[Content] Card body not found:', `pl-body-${baseSectionId}`);
-        return;
-      }
-      
-      // Clear loading skeleton and timer
-      const timerEl = querySidebar(`#pl-timer-${baseSectionId}`);
-      if (timerEl) {
-        timerEl.remove();
-      }
-      const timerInterval = card.dataset.timerInterval;
-      if (timerInterval) {
-        clearInterval(parseInt(timerInterval));
-      }
-      
-      // Render SVG
-      if (svg && svg.trim()) {
-        // Sanitize SVG
-        const cleanSvg = svg.replace(/<script[\s\S]*?<\/script>/gi, '');
-        cardBody.innerHTML = `<div class="napkin-visual-wrapper">${cleanSvg}</div>`;
-        
-        // Make SVG responsive
-        const svgEl = cardBody.querySelector('svg');
-        if (svgEl) {
-          svgEl.style.width = '100%';
-          svgEl.style.height = 'auto';
-          svgEl.removeAttribute('width');
-          svgEl.removeAttribute('height');
-        }
-      } else {
-        cardBody.innerHTML = '<div class="pl-error">Visual unavailable for this section.</div>';
-      }
-      
-      console.log('[Content] Main section visual rendered:', baseSectionId);
+      cardBody.innerHTML = '<div class="pl-error">Visual unavailable for this section.</div>';
     }
-    
-    // Update progress
+
     setTimeout(updateProgress, 100);
   }
 
-  if (message.type === 'no_content') {
-    console.log('[Content] No visualizable content message received:', message.reason);
-    showNoContentMessage(message.reason || 'No visualizable content found on this page');
+  // ── 'section_start' event (alternative flow) ───────────────────────────────
+  if (message.type === 'section_start') {
+    const { sectionId, heading, diagramType } = message;
+    if (!sidebarShadow) return;
+
+    const container = querySidebar('#pl-cards-container');
+    if (!container) return;
+
+    // Remove initial empty state
+    const emptyState = querySidebar('#pl-empty-state');
+    if (emptyState) emptyState.remove();
+
+    const card = createSectionCard(sectionId, heading, diagramType);
+    container.appendChild(card);
+
+    // Start timer
+    const interval = startCardTimer(sectionId);
+    if (interval) card.dataset.timerInterval = interval;
   }
 
-  if (message.type === 'complete' || message.type === 'AGENT_COMPLETE') {
-    console.log('[Content] Analysis complete message received');
-    
-    // Final progress update
-    updateProgress();
-    
-    const progressText = querySidebar('#pl-progress-text');
-    if (progressText) {
-      progressText.textContent = 'Analysis complete!';
+  if (message.type === 'section_complete') {
+    const { sectionId, svg, heading } = message;
+    if (!sidebarShadow) return;
+
+    const baseSectionId = sectionId.includes('-') ? sectionId : sectionId;
+    const card = querySidebar(`#pl-card-${baseSectionId}`);
+
+    if (!card) {
+      // Card might use combined ID — find by partial
+      const allCards = querySidebarAll('.pl-card');
+      const matchCard = allCards.find(c => c.id.startsWith(`pl-card-${baseSectionId}`));
+      if (!matchCard) return;
     }
-    
-    const progressFill = querySidebar('#pl-progress-fill');
-    if (progressFill) {
-      progressFill.style.width = '100%';
+
+    const cardBody = querySidebar(`#pl-body-${baseSectionId}`);
+    if (!cardBody) return;
+
+    // Clear timer
+    const timerEl = querySidebar(`#pl-timer-${baseSectionId}`);
+    if (timerEl) timerEl.remove();
+    const timerInterval = card?.dataset.timerInterval;
+    if (timerInterval) clearInterval(parseInt(timerInterval));
+
+    if (svg && svg.trim()) {
+      const cleanSvg = svg.replace(/<script[\s\S]*?<\/script>/gi, '');
+      cardBody.innerHTML = `<div class="napkin-visual-wrapper">${cleanSvg}</div>`;
+      const svgEl = cardBody.querySelector('svg');
+      if (svgEl) {
+        svgEl.style.width = '100%';
+        svgEl.style.height = 'auto';
+        svgEl.removeAttribute('width');
+        svgEl.removeAttribute('height');
+      }
+    } else {
+      cardBody.innerHTML = '<div class="pl-error">Visual unavailable for this section.</div>';
     }
-    
-    // Check if any visuals or errors were rendered
-    const allCards = querySidebarAll('.pl-card');
-    // Include visuals rendered in segments and main card bodies
-    const cardsWithVisuals = querySidebarAll('.pl-card svg');
-    const cardsWithErrors = querySidebarAll('.pl-card .pl-error');
-    if (cardsWithVisuals.length === 0 && cardsWithErrors.length === 0 && allCards.length > 0) {
-      console.warn('[Content] No visuals rendered despite completion.');
-      showNoContentMessage('No visuals were generated for this page. Try highlighting a smaller section or retrying.');
-    }
+
+    setTimeout(updateProgress, 100);
   }
 
   if (message.type === 'section_error') {
     const { sectionId, message: errorMsg } = message;
+    if (!sidebarShadow) return;
+
     const card = querySidebar(`#pl-card-${sectionId}`);
     if (card) {
       const timerEl = querySidebar(`#pl-timer-${sectionId}`);
-      if (timerEl) {
-        timerEl.remove();
-      }
+      if (timerEl) timerEl.remove();
       const timerInterval = card.dataset.timerInterval;
-      if (timerInterval) {
-        clearInterval(parseInt(timerInterval));
-      }
-      const cardBody = card.querySelector(`#pl-body-${sectionId}`);
+      if (timerInterval) clearInterval(parseInt(timerInterval));
+
+      const cardBody = querySidebar(`#pl-body-${sectionId}`);
       if (cardBody) {
-        cardBody.innerHTML = `<div class="pl-error">Error: ${errorMsg || 'Failed to generate visual'}</div>`;
+        cardBody.innerHTML = `<div class="pl-error">${escapeHtml(errorMsg || 'Failed to generate visual')}</div>`;
       }
     }
+  }
+
+  if (message.type === 'no_content') {
+    showNoContentMessage(message.reason || 'No visualizable content found on this page');
   }
 
   if (message.type === 'error') {
     showError(message.message || 'An error occurred');
     const banner = document.getElementById('paperlens-banner');
-    if (banner) {
-      banner.remove();
+    if (banner) banner.remove();
+  }
+
+  if (message.type === 'AGENT_ERROR') {
+    const banner = document.getElementById('paperlens-banner');
+    if (banner) banner.remove();
+    const isServerDown = message.message && (
+      message.message.includes('Cannot connect') ||
+      message.message.includes('server is not running') ||
+      message.message.includes('Failed to fetch') ||
+      message.message.includes('ECONNREFUSED')
+    );
+    if (isServerDown) {
+      showServerDownState();
+    } else {
+      const progressArea = querySidebar('#pl-progress-area');
+      if (progressArea) progressArea.style.display = 'none';
+      showError(message.message || 'Analysis failed');
+    }
+  }
+
+  if (message.type === 'complete' || message.type === 'AGENT_COMPLETE') {
+    updateProgress();
+
+    const banner = document.getElementById('paperlens-banner');
+    if (banner) banner.remove();
+
+    const progressText = querySidebar('#pl-progress-text');
+    if (progressText) progressText.textContent = 'Analysis complete';
+
+    const progressFill = querySidebar('#pl-progress-fill');
+    if (progressFill) progressFill.style.width = '100%';
+
+    // Fade out progress bar after 2s if visuals are showing
+    setTimeout(() => {
+      const progressArea = querySidebar('#pl-progress-area');
+      if (progressArea && !noContentShown) {
+        progressArea.style.transition = 'opacity 0.5s ease';
+        progressArea.style.opacity = '0';
+        setTimeout(() => {
+          if (progressArea) progressArea.style.display = 'none';
+        }, 500);
+      }
+    }, 2000);
+
+    // Check if anything was rendered
+    const allCards = querySidebarAll('.pl-card');
+    const cardsWithVisuals = querySidebarAll('.pl-card svg');
+    const cardsWithErrors = querySidebarAll('.pl-card .pl-error');
+
+    if (!noContentShown && cardsWithVisuals.length === 0 && cardsWithErrors.length === 0 && allCards.length === 0) {
+      showNoContentMessage('No visuals were generated. Try highlighting a specific section to generate a single visual.');
     }
   }
 });
 
-// Note: CSS is now injected inside Shadow DOM, so we don't need to inject sidebar.css globally
-// The sidebar.css file is kept for reference but not used
+/**
+ * Show visualize button
+ */
+function showVisualizeButton(range) {
+  const existing = document.getElementById('paperlens-viz-btn');
+  if (existing) existing.remove();
 
-// Initialize handlers - ensure they work on ALL pages
-// Wait for DOM to be ready if needed
+  const rect = range.getBoundingClientRect();
+  const button = document.createElement('button');
+  button.id = 'paperlens-viz-btn';
+
+  Object.assign(button.style, {
+    position: 'fixed',
+    top: `${Math.max(8, rect.top - 44)}px`,
+    left: `${Math.max(8, Math.min(rect.left, window.innerWidth - 160))}px`,
+    zIndex: '2147483646',
+    background: 'linear-gradient(135deg, #6366f1 0%, #818cf8 100%)',
+    color: 'white',
+    border: 'none',
+    padding: '8px 14px',
+    borderRadius: '8px',
+    fontSize: '12px',
+    fontWeight: '700',
+    cursor: 'pointer',
+    boxShadow: '0 4px 16px rgba(99, 102, 241, 0.4)',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    letterSpacing: '0.01em',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    transition: 'transform 0.1s ease, box-shadow 0.1s ease',
+  });
+
+  button.innerHTML = `
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+      <circle cx="6" cy="6" r="5" stroke="white" stroke-width="1.5"/>
+      <circle cx="6" cy="6" r="2" fill="white"/>
+    </svg>
+    Visualize
+  `;
+
+  button.addEventListener('mouseenter', () => {
+    button.style.transform = 'scale(1.04)';
+    button.style.boxShadow = '0 6px 20px rgba(99, 102, 241, 0.5)';
+  });
+
+  button.addEventListener('mouseleave', () => {
+    button.style.transform = 'scale(1)';
+    button.style.boxShadow = '0 4px 16px rgba(99, 102, 241, 0.4)';
+  });
+
+  const text = range.toString().trim();
+  const contentType = detectContentType(text);
+  let highlightSpan = null;
+  let savedRange = null;
+
+  try {
+    savedRange = range.cloneRange();
+  } catch (e) { /* ignore */ }
+
+  button._cleanup = () => {
+    if (button._selectionChangeHandler) {
+      document.removeEventListener('selectionchange', button._selectionChangeHandler);
+    }
+  };
+
+  button.addEventListener('click', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    button.remove();
+
+    if (!text || text.length < 15) {
+      showError('Please select at least a few words to visualize.');
+      return;
+    }
+
+    showSidebar('SINGLE', { preserveSelection: true, selectedText: text });
+
+    if (savedRange && window.getSelection) {
+      setTimeout(() => {
+        try {
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(savedRange);
+        } catch (e) { /* ignore */ }
+      }, 100);
+    }
+
+    const containerId = 'pl-single-visual';
+
+    try {
+      chrome.runtime.sendMessage({ type: 'GENERATE', text, contentType }, (response) => {
+        if (chrome.runtime.lastError) {
+          showError('Failed to generate visual');
+          return;
+        }
+
+        if (!sidebarShadow) return;
+
+        const container = querySidebar(`#${containerId}`);
+        if (!container) return;
+
+        if (response && response.segments && Array.isArray(response.segments)) {
+          container.innerHTML = '';
+          response.segments.forEach((segment, index) => {
+            const segDiv = document.createElement('div');
+            segDiv.className = 'pl-segment';
+
+            const titleDiv = document.createElement('div');
+            titleDiv.className = 'pl-segment-heading';
+            titleDiv.textContent = segment.title || `Segment ${index + 1}`;
+            segDiv.appendChild(titleDiv);
+
+            const visualDiv = document.createElement('div');
+            visualDiv.className = 'napkin-visual-wrapper';
+
+            if (segment.svg) {
+              const cleanSvg = segment.svg.replace(/<script[\s\S]*?<\/script>/gi, '');
+              visualDiv.innerHTML = cleanSvg;
+              const svgEl = visualDiv.querySelector('svg');
+              if (svgEl) { svgEl.style.width = '100%'; svgEl.style.height = 'auto'; }
+            } else {
+              visualDiv.innerHTML = '<div class="pl-error">Visual unavailable</div>';
+            }
+
+            segDiv.appendChild(visualDiv);
+            container.appendChild(segDiv);
+          });
+        } else if (response && response.svg) {
+          const cleanSvg = response.svg.replace(/<script[\s\S]*?<\/script>/gi, '');
+          container.innerHTML = `<div class="napkin-visual-wrapper">${cleanSvg}</div>`;
+          const svgEl = container.querySelector('svg');
+          if (svgEl) { svgEl.style.width = '100%'; svgEl.style.height = 'auto'; }
+        } else if (response && response.error) {
+          if (response.evaluationRejected) {
+            const reason = response.reason || 'Content not suitable for visualization';
+            showNoContentMessage(reason);
+          } else {
+            showError(response.error);
+          }
+        } else {
+          showError('No visual was generated. Try selecting different text.');
+        }
+      });
+    } catch (error) {
+      showError('Failed to generate visual');
+    }
+  });
+
+  document.body.appendChild(button);
+
+  const timeoutId = setTimeout(() => {
+    button._cleanup?.();
+    button.remove();
+  }, 10000);
+
+  const selectionChangeHandler = () => {
+    const selection = window.getSelection();
+    if (!selection.rangeCount || selection.toString().trim() !== text) {
+      clearTimeout(timeoutId);
+      button._cleanup?.();
+      button.remove();
+      document.removeEventListener('selectionchange', selectionChangeHandler);
+    }
+  };
+
+  document.addEventListener('selectionchange', selectionChangeHandler);
+  button._selectionChangeHandler = selectionChangeHandler;
+}
+
+/**
+ * Detect content type
+ */
+function detectContentType(text) {
+  if (/```|function |const |var |let |class |import |export /.test(text)) return 'code';
+  if (/\d+\.\s+|\n[-*]\s+/.test(text)) return 'list';
+  if (/abstract|introduction|methodology|results|conclusion/i.test(text)) return 'academic';
+  return 'text';
+}
+
+/**
+ * Handle manual highlight
+ */
+function handleManualHighlight() {
+  let selectionTimeout = null;
+  let ctrlAPressed = false;
+  let ctrlAPressTime = 0;
+
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'a' && !e.shiftKey) {
+      ctrlAPressed = true;
+      ctrlAPressTime = Date.now();
+      setTimeout(() => {
+        if (Date.now() - ctrlAPressTime > 400) ctrlAPressed = false;
+      }, 500);
+    }
+  });
+
+  document.addEventListener('mouseup', (e) => {
+    if (isSidebarOpen) return;
+    if (e.target?.id === 'paperlens-viz-btn') return;
+
+    if (selectionTimeout) clearTimeout(selectionTimeout);
+
+    selectionTimeout = setTimeout(() => {
+      const selection = window.getSelection();
+      if (!selection || !selection.rangeCount) return;
+
+      const newText = selection.toString().trim();
+      if (!newText || newText.length < 15) return;
+
+      const pageText = document.body ? document.body.innerText.trim() : '';
+
+      if (!pageText || newText.length > pageText.length * 0.8 || newText.length > 10000 || (pageText.length > 200 && newText.length === 0)) {
+        if (window.getSelection) window.getSelection()?.removeAllRanges();
+        showSidebar('AGENTIC');
+        triggerAgenticAnalysis();
+        return;
+      }
+
+      if (ctrlAPressed && Date.now() - ctrlAPressTime < 600) {
+        return;
+      }
+
+      try {
+        const range = selection.getRangeAt(0);
+        showVisualizeButton(range);
+      } catch (error) {
+        console.error('[Content] Error showing visualize button:', error);
+      }
+    }, 150);
+  });
+}
+
+/**
+ * Trigger agentic analysis
+ */
+async function triggerAgenticAnalysis() {
+  console.log('[PaperLens] triggerAgenticAnalysis started');
+
+  // Remove any existing banner
+  const existingBanner = document.getElementById('paperlens-banner');
+  if (existingBanner) existingBanner.remove();
+
+  const banner = document.createElement('div');
+  banner.id = 'paperlens-banner';
+  Object.assign(banner.style, {
+    position: 'fixed',
+    top: '0',
+    left: '0',
+    right: '420px',
+    zIndex: '2147483646',
+    background: 'linear-gradient(90deg, rgba(99,102,241,0.12), rgba(99,102,241,0.06))',
+    borderBottom: '1px solid rgba(99,102,241,0.2)',
+    color: '#a5b4fc',
+    padding: '10px 16px',
+    fontSize: '12px',
+    fontWeight: '600',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    letterSpacing: '0.02em',
+  });
+  banner.textContent = '✦ PaperLens is analyzing this page…';
+  document.body.insertBefore(banner, document.body.firstChild);
+
+  try {
+    // Step 1: Check server is actually reachable directly from content script
+    console.log('[PaperLens] Checking server health at', SERVER_URL);
+    try {
+      const healthRes = await fetch(`${SERVER_URL}/health`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(5000),
+      });
+      console.log('[PaperLens] Server health:', healthRes.status, healthRes.ok);
+      if (!healthRes.ok) {
+        banner.remove();
+        showServerDownState();
+        return;
+      }
+    } catch (healthErr) {
+      console.warn('[PaperLens] Server health check failed:', healthErr.message);
+      banner.remove();
+      showServerDownState();
+      return;
+    }
+
+    // Step 2: Extract page content
+    console.log('[PaperLens] Extracting page structure...');
+    const paperData = window.extractPaperStructure ? window.extractPaperStructure() : null;
+    if (!paperData) {
+      showError('Could not extract page content.');
+      banner.remove();
+      return;
+    }
+    console.log('[PaperLens] Extracted:', paperData.sections.length, 'sections,', paperData.totalWordCount, 'words');
+
+    if (paperData.isPDF) {
+      showError('PDF files cannot be analyzed directly. Please use the HTML version.');
+      banner.remove();
+      return;
+    }
+
+    if (paperData.sections.length === 0) {
+      banner.remove();
+      showNoContentMessage('No text sections could be extracted from this page.');
+      return;
+    }
+
+    // Step 3: Update sidebar title
+    const titleEl = querySidebar('#pl-paper-title');
+    if (titleEl) {
+      titleEl.textContent = paperData.title || 'Page Analysis';
+      titleEl.style.display = 'block';
+    }
+
+    // Step 4: Send to background for SSE streaming
+    console.log('[PaperLens] Sending ANALYZE_PAPER to background...');
+    chrome.runtime.sendMessage({ type: 'ANALYZE_PAPER', paperData });
+    console.log('[PaperLens] ANALYZE_PAPER sent — waiting for SSE events...');
+
+  } catch (error) {
+    console.error('[PaperLens] triggerAgenticAnalysis error:', error);
+    banner.remove();
+    const progressArea = querySidebar('#pl-progress-area');
+    if (progressArea) progressArea.style.display = 'none';
+    showError('Analysis failed: ' + error.message);
+  }
+}
+
+/**
+ * Ping background service
+ */
+function pingBackground() {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ type: 'PING' }, (response) => {
+        if (chrome.runtime.lastError) {
+          resolve(false);
+          return;
+        }
+        // Background sends { status: 'ok' } — accept either .ok or .status === 'ok'
+        resolve(response && (response.ok === true || response.status === 'ok'));
+      });
+    } catch (e) {
+      resolve(false);
+    }
+  });
+}
+
+/**
+ * Handle agentic mode keyboard shortcut
+ */
+function handleAgenticMode() {
+  document.addEventListener('keydown', async (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'A') {
+      e.preventDefault();
+      e.stopPropagation();
+
+      window.getSelection()?.removeAllRanges();
+
+      setTimeout(async () => {
+        if (isSidebarOpen) return;
+
+        showSidebar('AGENTIC');
+        window.getSelection()?.removeAllRanges();
+        await triggerAgenticAnalysis();
+      }, 50);
+    }
+  });
+
+  // Also listen for custom event (from background trigger)
+  document.addEventListener('paperlens-trigger-agentic', async () => {
+    if (isSidebarOpen) return;
+    showSidebar('AGENTIC');
+    await triggerAgenticAnalysis();
+  });
+}
+
+/**
+ * Initialize
+ */
 function initializeHandlers() {
   try {
-    console.log('[Content] Initializing PaperLens handlers on:', window.location.href);
-    console.log('[Content] Document ready state:', document.readyState);
-    console.log('[Content] Document body exists:', !!document.body);
-    
     handleManualHighlight();
     handleAgenticMode();
-    
-    console.log('[Content] Handlers initialized successfully');
+    console.log('[PaperLens] Initialized on:', window.location.href);
   } catch (error) {
-    console.error('[Content] Error initializing handlers:', error);
-    console.error('[Content] Error stack:', error.stack);
+    console.error('[PaperLens] Init error:', error);
   }
 }
 
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', initializeHandlers);
 } else {
-  // DOM already ready, but wait a bit to ensure everything is loaded
   setTimeout(initializeHandlers, 100);
 }
