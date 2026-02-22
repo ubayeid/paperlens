@@ -1,0 +1,496 @@
+/**
+ * PaperLens Sidebar Styles
+ * Dark theme, clean, professional design
+ */
+
+:root {
+  --sidebar-bg: #0f0f1a;
+  --card-bg: #1a1a2e;
+  --border: #2a2a3e;
+  --accent: #7c5cbf;
+  --accent-light: #9d7de8;
+  --text: #e8e8f0;
+  --text-secondary: #8888aa;
+}
+
+#paperlens-sidebar {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 420px;
+  min-width: 300px;
+  max-width: 80vw;
+  height: 100vh;
+  background: var(--sidebar-bg);
+  border-left: 1px solid var(--border);
+  z-index: 9999;
+  transform: translateX(420px);
+  transition: transform 300ms ease-out, width 200ms ease-out;
+  overflow-y: auto;
+  overflow-x: hidden;
+  box-shadow: -4px 0 20px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  /* Prevent text selection in sidebar */
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+}
+
+/* Allow selection only for specific interactive elements */
+#paperlens-sidebar .paperlens-section-heading,
+#paperlens-sidebar .paperlens-paper-title,
+#paperlens-sidebar .paperlens-selected-text-content,
+#paperlens-sidebar .napkin-visual-wrapper,
+#paperlens-sidebar .napkin-btn {
+  user-select: text;
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  -ms-user-select: text;
+}
+
+/* Selected text display in manual mode */
+.paperlens-selected-text {
+  padding: 16px;
+  margin-bottom: 16px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  border-left: 3px solid var(--accent);
+}
+
+.paperlens-selected-text-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-light);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.paperlens-selected-text-content {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+  max-height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+}
+
+.paperlens-resize-handle {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  cursor: ew-resize;
+  z-index: 10000;
+}
+
+.paperlens-resize-handle:hover {
+  background: var(--accent);
+  opacity: 0.5;
+}
+
+#paperlens-sidebar::-webkit-scrollbar {
+  width: 8px;
+}
+
+#paperlens-sidebar::-webkit-scrollbar-track {
+  background: var(--sidebar-bg);
+}
+
+#paperlens-sidebar::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
+#paperlens-sidebar::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+}
+
+.paperlens-sidebar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card-bg);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  flex-shrink: 0; /* Prevent header from shrinking */
+}
+
+.paperlens-logo {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  margin-right: 8px;
+}
+
+.paperlens-mode-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  background: var(--accent);
+  color: white;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.paperlens-close-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 24px;
+  cursor: pointer;
+  padding: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+
+.paperlens-close-btn:hover {
+  background: var(--border);
+  color: var(--text);
+}
+
+.paperlens-sidebar-content {
+  padding: 20px;
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Paper Title (Agentic Mode) */
+.paperlens-paper-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 20px;
+  line-height: 1.4;
+}
+
+/* Progress Bar (Agentic Mode) */
+.paperlens-progress {
+  margin-bottom: 24px;
+}
+
+.paperlens-progress-text {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.paperlens-progress-bar {
+  width: 100%;
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.paperlens-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-light));
+  width: 0%;
+  transition: width 0.3s ease;
+  border-radius: 3px;
+}
+
+/* Section Cards (Agentic Mode) */
+.paperlens-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.paperlens-section-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  opacity: 0;
+  transform: translateY(8px);
+  animation: cardReveal 400ms ease-out forwards;
+}
+
+@keyframes cardReveal {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.paperlens-section-header {
+  margin-bottom: 12px;
+}
+
+.paperlens-section-heading {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+
+/* Napkin Visual Wrapper */
+.napkin-visual-wrapper {
+  margin-top: 12px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: white;
+  padding: 8px;
+}
+
+.napkin-visual-wrapper svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* Napkin Actions */
+.napkin-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.napkin-btn {
+  flex: 1;
+  padding: 6px 12px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s;
+}
+
+.napkin-btn:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+/* Loading Skeleton */
+.napkin-loading-skeleton {
+  width: 100%;
+  height: 200px;
+  background: var(--card-bg);
+  border-radius: 6px;
+  position: relative;
+  overflow: hidden;
+  margin-top: 12px;
+}
+
+.napkin-shimmer {
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    var(--card-bg) 0%,
+    #2a2a4a 50%,
+    var(--card-bg) 100%
+  );
+  animation: shimmer 1.5s infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    left: -100%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+
+.napkin-loading-text {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+/* Floating Button */
+.paperlens-floating-btn {
+  position: fixed !important;
+  z-index: 10000 !important;
+  pointer-events: auto !important;
+  background: var(--accent);
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(124, 92, 191, 0.4);
+  transition: all 0.2s;
+}
+
+.paperlens-floating-btn:hover {
+  background: var(--accent-light);
+  box-shadow: 0 6px 16px rgba(124, 92, 191, 0.5);
+  transform: translateY(-1px);
+}
+
+/* Banner */
+.paperlens-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  background: var(--accent);
+  color: white;
+  padding: 12px 20px;
+  text-align: center;
+  font-size: 14px;
+  font-weight: 500;
+  z-index: 10001;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+/* Error Messages */
+.paperlens-error {
+  color: #ff6b6b;
+  font-size: 14px;
+  padding: 12px;
+  background: rgba(255, 107, 107, 0.1);
+  border-radius: 6px;
+  border: 1px solid rgba(255, 107, 107, 0.3);
+  margin-top: 12px;
+}
+
+/* Single Mode Visual Container */
+#paperlens-single-visual {
+  min-height: 200px;
+}
+
+/* Prevent sidebar from being selected when main content is selected */
+#paperlens-sidebar * {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Allow selection only for specific elements */
+#paperlens-sidebar .paperlens-section-heading,
+#paperlens-sidebar .paperlens-paper-title,
+#paperlens-sidebar .paperlens-progress-text {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
+/* SVG visuals should be selectable for copying */
+#paperlens-sidebar .napkin-visual-wrapper,
+#paperlens-sidebar .napkin-visual-wrapper * {
+  user-select: all;
+  -webkit-user-select: all;
+}
+
+/* Full-screen Modal */
+.paperlens-fullscreen-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.95);
+  z-index: 100000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  animation: fadeIn 200ms ease-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.paperlens-fullscreen-close {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  font-size: 28px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100001;
+  transition: all 0.2s;
+}
+
+.paperlens-fullscreen-close:hover {
+  background: var(--accent-light);
+  transform: scale(1.1);
+}
+
+.paperlens-fullscreen-svg-container {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+}
+
+.paperlens-fullscreen-svg-container svg {
+  max-width: 100%;
+  max-height: 100%;
+  background: white;
+  border-radius: 8px;
+  padding: 20px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+/* Resizable sidebar */
+#paperlens-sidebar {
+  resize: horizontal;
+  overflow: hidden;
+}
+
+#paperlens-sidebar::-webkit-resizer {
+  background: var(--border);
+  width: 4px;
+}
+
+.napkin-btn-view {
+  background: var(--accent);
+  color: white;
+}
+
+.napkin-btn-view:hover {
+  background: var(--accent-light);
+}
