@@ -1,32 +1,94 @@
 # Dependencies
 node_modules/
-package-lock.json
+# Note: package-lock.json should usually be committed for consistency
+# Uncomment the next line if you want to ignore it:
+# package-lock.json
+yarn.lock
+pnpm-lock.yaml
 
-# Environment variables
+# Environment variables (CRITICAL - contains API keys)
 .env
 .env.local
+.env.*.local
+server/.env
+*.env
 
 # Logs
 *.log
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+server/logs/
+logs/
+*.log.*
 
 # OS files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+Desktop.ini
 
-# IDE
+# IDE and Editor files
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
 
 # Build outputs
 dist/
 build/
+out/
+*.tsbuildinfo
 
-# Extension
+# Extension build files
 extension/*.crx
 extension/*.pem
+extension/*.zip
+*.crx
+*.pem
 
-# Server
+# Cache and temporary files
+.cache/
+.temp/
+tmp/
+temp/
+*.tmp
+*.cache
+.npm/
+.eslintcache
+.parcel-cache/
+
+# Testing
+coverage/
+.nyc_output/
+*.lcov
+.jest/
+
+# Server-specific
 server/logs/
+server/.env
+server/node_modules/
+
+# Chrome extension specific
+*.crx
+*.pem
+extension.zip
+
+# Optional: Keep package-lock.json (uncomment if you want to ignore it)
+# package-lock.json
+
+# Optional: Keep .env.example (this should be committed)
+!.env.example
+!server/.env.example
