@@ -70,12 +70,25 @@ async function handleGenerate(message, sendResponse) {
     });
 
     if (!response.ok) {
-      let errorMessage = 'Failed to generate visual';
+      let errorMessage = `Server returned ${response.status}: ${response.statusText}`;
       try {
         const errorData = await response.json();
-        errorMessage = errorData.error || `Server returned ${response.status}: ${response.statusText}`;
+        // Handle evaluation rejection (400 status)
+        if (response.status === 400 && errorData.reason) {
+          errorMessage = errorData.reason || 'Content not suitable for visualization';
+          sendResponse({ 
+            error: errorMessage,
+            evaluationRejected: true,
+            reason: errorData.reason,
+            confidence: errorData.confidence,
+            visualizationPotential: errorData.visualizationPotential,
+          });
+          return;
+        }
+        errorMessage = errorData.error || errorData.message || errorMessage;
       } catch (e) {
-        errorMessage = `Server returned ${response.status}: ${response.statusText}`;
+        const errorText = await response.text();
+        errorMessage = errorText || errorMessage;
       }
       sendResponse({ error: errorMessage });
       return;
@@ -211,10 +224,23 @@ async function handleAnalyzePaper(message, tabId) {
               const jsonStr = line.substring(6).trim();
               if (jsonStr) {
                 const data = JSON.parse(jsonStr);
+                
+                // Log SSE events for debugging
+                console.log('[Background] SSE event received:', data.type, data.sectionId || 'N/A', {
+                  hasSvg: !!data.svg,
+                  svgLength: data.svg ? data.svg.length : 0,
+                  heading: data.heading || 'N/A',
+                  sectionId: data.sectionId || 'N/A',
+                  dataKeys: Object.keys(data),
+                });
 
                 // Forward to content script
+                // Use sendMessage with error handling - content script might not be loaded yet
                 chrome.tabs.sendMessage(tabId, data).catch(err => {
-                  console.error('[Background] Error sending message to tab:', err);
+                  // Only log if it's not a "receiving end does not exist" error (content script not loaded)
+                  if (!err.message || !err.message.includes('Receiving end does not exist')) {
+                    console.error('[Background] Error sending message to tab:', err, 'Data:', data);
+                  }
                 });
               }
             } catch (parseError) {

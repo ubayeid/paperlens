@@ -9,6 +9,7 @@ const { createVisualRequest, RateLimitError, AuthError, NapkinServerError } = re
 const { pollUntilComplete, TimeoutError } = require('../napkin/poller');
 const { downloadAndServeSVG } = require('../napkin/downloader');
 const { segmentContent } = require('../agent/segmenter');
+const { evaluateContent } = require('../agent/evaluator');
 
 const router = express.Router();
 
@@ -53,9 +54,25 @@ router.post('/', limiter, async (req, res) => {
     console.log('[Generate Route] Received text length:', text.length);
     console.log('[Generate Route] Text preview (first 200 chars):', text.substring(0, 200));
     
-    // Step 1: Use OpenAI to segment the content intelligently
-    console.log('[Generate Route] Segmenting content...');
+    // Step 0: Evaluate if content is worthy of visualization
+    console.log('[Generate Route] Evaluating content quality...');
     const context = contextBefore || contextAfter ? `Selected content (context: ${contextBefore || ''} ... ${contextAfter || ''})` : 'Selected content';
+    const evaluation = await evaluateContent(text, context);
+    
+    if (!evaluation.worthy) {
+      console.log('[Generate Route] Content rejected:', evaluation.reason);
+      return res.status(400).json({
+        error: 'Content not suitable for visualization',
+        reason: evaluation.reason,
+        confidence: evaluation.confidence,
+        visualizationPotential: evaluation.visualizationPotential,
+      });
+    }
+    
+    console.log('[Generate Route] Content approved:', evaluation.reason, `(confidence: ${evaluation.confidence})`);
+    
+    // Step 1: Use AI to segment the content intelligently
+    console.log('[Generate Route] Segmenting content...');
     const segments = await segmentContent(text, context);
     
     console.log(`[Generate Route] Created ${segments.length} segments`);

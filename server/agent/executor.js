@@ -8,6 +8,7 @@ const { pollUntilComplete } = require('../napkin/poller');
 const { downloadAndServeSVG } = require('../napkin/downloader');
 const { processSection } = require('./decider');
 const { segmentContent } = require('./segmenter');
+const { evaluateContent } = require('./evaluator');
 const { RateLimitError } = require('../napkin/client');
 
 // Concurrency limiter: max 3 parallel Napkin requests
@@ -128,21 +129,46 @@ async function execute(plan, paperData, onDiagram) {
         throw new Error('Processed section text is empty');
       }
       
-      // Step 1: Use OpenAI to segment the section content intelligently
-      console.log(`[Executor] Segmenting section "${planItem.heading}"...`);
+      // Step 1: Evaluate if section content is worthy of visualization
+      console.log(`[Executor] Evaluating section "${planItem.heading}"...`);
       const context = `Section: ${planItem.heading}${planItem.contextBefore ? ` (Context: ${planItem.contextBefore})` : ''}`;
+      const evaluation = await evaluateContent(processed.text, context);
+      
+      if (!evaluation.worthy) {
+        console.log(`[Executor] Section "${planItem.heading}" rejected:`, evaluation.reason);
+        onDiagram(planItem.sectionId, null, planItem.heading, `Content not suitable for visualization: ${evaluation.reason}`);
+        return; // Skip this section
+      }
+      
+      console.log(`[Executor] Section "${planItem.heading}" approved (confidence: ${evaluation.confidence})`);
+      
+      // Step 2: Use AI to segment the section content intelligently
+      console.log(`[Executor] Segmenting section "${planItem.heading}"...`);
       const segments = await segmentContent(processed.text, context);
       
       console.log(`[Executor] Section "${planItem.heading}" split into ${segments.length} segments`);
 
-      // Step 2: Generate visuals for each segment
+      let visualsGenerated = 0;
+      let segmentsRejected = 0;
+      let segmentsSkipped = 0;
+
+      // Step 3: Generate visuals for each segment
       for (const segment of segments) {
         try {
+          // Evaluate each segment individually as well
+          const segmentEvaluation = await evaluateContent(segment.text, `Segment: ${segment.title}`);
+          if (!segmentEvaluation.worthy) {
+            console.log(`[Executor] Segment "${segment.title}" rejected:`, segmentEvaluation.reason);
+            segmentsRejected++;
+            continue; // Skip this segment
+          }
+          
           // Truncate segment text to 2000 chars if needed (Napkin limit)
           const segmentText = segment.text.length > 2000 ? segment.text.substring(0, 2000) : segment.text;
 
           if (!segmentText || segmentText.trim().length < 50) {
             console.warn(`[Executor] Skipping segment "${segment.title}" - text too short`);
+            segmentsSkipped++;
             continue;
           }
 
@@ -159,6 +185,7 @@ async function execute(plan, paperData, onDiagram) {
 
           if (!generatedFiles || generatedFiles.length === 0) {
             console.warn(`[Executor] No files generated for segment "${segment.title}"`);
+            segmentsSkipped++;
             continue;
           }
 
@@ -170,6 +197,7 @@ async function execute(plan, paperData, onDiagram) {
           // Use combined sectionId-segmentId to uniquely identify each visual
           const combinedId = `${planItem.sectionId}-${segment.id}`;
           onDiagram(combinedId, svg, segment.title, null);
+          visualsGenerated++;
         } catch (segmentError) {
           console.error(`[Executor] Error processing segment "${segment.title}":`, segmentError);
           // Continue with other segments even if one fails
@@ -178,6 +206,47 @@ async function execute(plan, paperData, onDiagram) {
             throw segmentError;
           }
         }
+      }
+
+      // If no visuals were generated for any segment, try a single fallback visual for the whole section
+      if (visualsGenerated === 0) {
+        const fallbackText = processed.text.length > 2000
+          ? processed.text.substring(0, 2000)
+          : processed.text;
+
+        if (fallbackText && fallbackText.trim().length >= 80) {
+          try {
+            console.log(`[Executor] Fallback visual for section: "${planItem.heading}"`);
+            const requestId = await createVisualRequest(fallbackText.trim(), {
+              contextBefore: processed.contextBefore || '',
+              contextAfter: processed.contextAfter || '',
+            });
+
+            const generatedFiles = await pollUntilComplete(requestId);
+            if (generatedFiles && generatedFiles.length > 0) {
+              const fileUrl = generatedFiles[0].url;
+              const svg = await downloadAndServeSVG(fileUrl);
+              onDiagram(planItem.sectionId, svg, planItem.heading, null);
+              visualsGenerated++;
+            } else {
+              segmentsSkipped++;
+            }
+          } catch (fallbackError) {
+            console.error('[Executor] Fallback visual error:', fallbackError);
+            if (fallbackError instanceof RateLimitError) {
+              throw fallbackError;
+            }
+          }
+        }
+      }
+
+      // If still no visuals, surface an error so the UI doesn't stay in loading state
+      if (visualsGenerated === 0) {
+        const allRejected = segmentsRejected > 0 && (segmentsRejected + segmentsSkipped) >= segments.length;
+        const reason = allRejected
+          ? 'No segments were suitable for visualization.'
+          : 'Failed to generate visuals for this section.';
+        onDiagram(planItem.sectionId, null, planItem.heading || planItem.sectionId, reason);
       }
     } catch (error) {
       // Retry on rate limit errors

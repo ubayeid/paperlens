@@ -18,11 +18,18 @@ function sanitizeSVG(svg) {
  * @param {string} containerId - Container element ID
  */
 function displaySVG(svgString, containerId) {
+  console.log(`[Napkin Handler] displaySVG called for container: ${containerId}, SVG length: ${svgString ? svgString.length : 0}`);
+  
   const container = document.getElementById(containerId);
   if (!container) {
     console.error(`[Napkin Handler] Container ${containerId} not found`);
+    // Try to find container by partial match
+    const allContainers = document.querySelectorAll('[id*="paperlens-visual"]');
+    console.error(`[Napkin Handler] Available visual containers:`, Array.from(allContainers).map(c => c.id));
     return;
   }
+  
+  console.log(`[Napkin Handler] Container found: ${containerId}, proceeding with SVG display`);
 
   // Sanitize SVG
   const sanitized = sanitizeSVG(svgString);

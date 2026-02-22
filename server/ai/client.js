@@ -67,9 +67,13 @@ async function generateChatCompletion(systemPrompt, userMessage, options = {}) {
     initializeAIClient();
   }
 
-  // Use gemini-2.5-flash as default (stable, fast, widely available in v1beta)
-  // Alternative models: gemini-2.5-pro, gemini-3-flash-preview, gemini-3.1-pro-preview
-  const model = options.model || (aiType === 'openai' ? 'gpt-4o-mini' : 'gemini-2.5-flash');
+  // Get model from options, env variable, or use defaults
+  // OpenAI models: gpt-4o-mini, gpt-4o, gpt-4-turbo, gpt-3.5-turbo
+  // Gemini models: gemini-2.5-flash, gemini-2.5-pro, gemini-3-flash-preview, gemini-3.1-pro-preview
+  const defaultModel = aiType === 'openai' 
+    ? (process.env.OPENAI_MODEL || 'gpt-4o-mini')
+    : (process.env.GEMINI_MODEL || 'gemini-2.5-flash');
+  const model = options.model || defaultModel;
   const temperature = options.temperature || 0.3;
   const responseFormat = options.responseFormat === 'json_object' || options.responseFormat === true;
 
@@ -97,25 +101,34 @@ async function generateChatCompletion(systemPrompt, userMessage, options = {}) {
       },
     });
 
-    const result = await geminiModel.generateContent(combinedPrompt);
-    const response = await result.response;
-    const text = response.text();
-    
-    // Gemini sometimes wraps JSON in markdown code blocks, extract if needed
-    if (responseFormat && text.includes('```json')) {
-      const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
-      if (jsonMatch) {
-        return jsonMatch[1].trim();
+    try {
+      const result = await geminiModel.generateContent(combinedPrompt);
+      const response = await result.response;
+      const text = response.text();
+      
+      // Gemini sometimes wraps JSON in markdown code blocks, extract if needed
+      if (responseFormat && text.includes('```json')) {
+        const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
+        if (jsonMatch) {
+          return jsonMatch[1].trim();
+        }
       }
-    }
-    if (responseFormat && text.includes('```')) {
-      const codeMatch = text.match(/```\s*([\s\S]*?)\s*```/);
-      if (codeMatch) {
-        return codeMatch[1].trim();
+      if (responseFormat && text.includes('```')) {
+        const codeMatch = text.match(/```\s*([\s\S]*?)\s*```/);
+        if (codeMatch) {
+          return codeMatch[1].trim();
+        }
       }
+      
+      return text.trim();
+    } catch (error) {
+      // Handle rate limit errors specifically
+      if (error.status === 429) {
+        const retryAfter = error.errorDetails?.find(d => d['@type']?.includes('RetryInfo'))?.retryDelay || '60';
+        throw new Error(`Gemini API rate limit exceeded. Free tier limit: 20 requests/day. Please retry in ${retryAfter} seconds or upgrade your plan.`);
+      }
+      throw error;
     }
-    
-    return text.trim();
   } else {
     throw new Error('AI client not initialized');
   }

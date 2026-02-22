@@ -31,15 +31,60 @@ router.post('/', async (req, res) => {
   try {
     // Step 1: Create plan
     console.log('[Analyze Route] Creating plan...');
-    const plan = await createPlan(paperData);
+    let planResult;
+    try {
+      planResult = await createPlan(paperData);
+    } catch (error) {
+      // Handle Gemini quota errors specifically
+      if (error.message && (error.message.includes('quota') || error.message.includes('429'))) {
+        res.write(`data: ${JSON.stringify({
+          type: 'error',
+          message: 'Gemini API quota exceeded. Free tier limit: 20 requests/day. Please wait or switch to OpenAI by setting USE_OPENAI=true in .env'
+        })}\n\n`);
+        res.end();
+        return;
+      }
+      throw error;
+    }
 
-    // Send plan immediately
-    res.write(`data: ${JSON.stringify({ type: 'plan', data: plan })}\n\n`);
+    // Check if content is visualizable
+    if (!planResult.hasVisualizableContent) {
+      // Send "no content" event with reason
+      res.write(`data: ${JSON.stringify({ 
+        type: 'no_content', 
+        reason: planResult.reason || 'No visualizable content found on this page'
+      })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'complete' })}\n\n`);
+      res.end();
+      console.log('[Analyze Route] No visualizable content:', planResult.reason);
+      return;
+    }
+
+    const plan = planResult.plan || [];
+    
+    // Send plan immediately (with hasVisualizableContent and reason)
+    res.write(`data: ${JSON.stringify({ 
+      type: 'plan', 
+      data: plan,
+      hasVisualizableContent: planResult.hasVisualizableContent,
+      reason: planResult.reason
+    })}\n\n`);
 
     // Step 2: Execute plan and stream results
     console.log('[Analyze Route] Executing plan...');
     let completedCount = 0;
     const totalSections = plan.filter(p => !p.skip).length;
+
+    if (totalSections === 0) {
+      // No sections to visualize
+      res.write(`data: ${JSON.stringify({ 
+        type: 'no_content', 
+        reason: planResult.reason || 'No sections selected for visualization'
+      })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'complete' })}\n\n`);
+      res.end();
+      return;
+    }
 
     await execute(plan, paperData, (sectionId, svg, heading, error) => {
       if (error) {

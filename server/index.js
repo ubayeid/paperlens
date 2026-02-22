@@ -63,18 +63,28 @@ app.listen(PORT, () => {
     console.warn('[Server] WARNING: Neither OPENAI_API_KEY nor GEMINI_API_KEY is set');
     console.warn('[Server] Set at least one AI API key in .env file');
   } else {
-    if (useOpenAI) {
-      if (hasOpenAI) {
-        console.log('[Server] USE_OPENAI=true → Using OpenAI API');
+    const { getAIType } = require('./ai/client');
+    try {
+      const aiType = getAIType();
+      const openaiModel = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+      const geminiModel = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+      const currentModel = aiType === 'openai' ? openaiModel : geminiModel;
+      
+      if (useOpenAI) {
+        if (hasOpenAI) {
+          console.log(`[Server] USE_OPENAI=true → Using OpenAI API (Model: ${currentModel})`);
+        } else {
+          console.warn('[Server] USE_OPENAI=true but OPENAI_API_KEY not set, will fall back to Gemini');
+        }
       } else {
-        console.warn('[Server] USE_OPENAI=true but OPENAI_API_KEY not set, will fall back to Gemini');
+        if (hasGemini) {
+          console.log(`[Server] USE_OPENAI=false → Using Gemini API (Model: ${currentModel})`);
+        } else if (hasOpenAI) {
+          console.log(`[Server] USE_OPENAI not set, auto-detected OpenAI API (Model: ${currentModel})`);
+        }
       }
-    } else {
-      if (hasGemini) {
-        console.log('[Server] USE_OPENAI=false → Using Gemini API');
-      } else if (hasOpenAI) {
-        console.log('[Server] USE_OPENAI not set, auto-detected OpenAI API');
-      }
+    } catch (error) {
+      console.warn('[Server] Could not determine AI model:', error.message);
     }
   }
 });
