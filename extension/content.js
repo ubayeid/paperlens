@@ -1,7 +1,7 @@
 /**
  * Content Script
  * Handles both agentic and manual modes
- * v2.1 - MVP Polish: better empty states, retry, improved UX
+ * v2.2 - Hackathon Final: full SVG height, click-to-expand, clean headings, plan-order sorting
  */
 
 const SERVER_URL = 'http://localhost:3000';
@@ -11,11 +11,13 @@ let sidebarShadow = null;
 let sidebarHost = null;
 let isSidebarOpen = false;
 let currentMode = null;
-let noContentShown = false; // Track if no-content state was already shown
+let noContentShown = false;
 
-/**
- * Helper: Get element from shadow root
- */
+// Stores card IDs in the order the plan arrived so we can re-sort after async visuals land
+let planOrder = [];
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
 function getSidebarElement(id) {
   if (!sidebarShadow) return null;
   return sidebarShadow.querySelector(`#${id}`);
@@ -32,8 +34,189 @@ function querySidebarAll(selector) {
 }
 
 /**
- * Show improved "no content" message with retry and tips
+ * Escape HTML
  */
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.appendChild(document.createTextNode(text));
+  return div.innerHTML;
+}
+
+/**
+ * Clean up section headings for display.
+ * Strips leading section numbers like "2.1 ", "3A ", "4. ", "Section 3: " etc.
+ */
+function cleanHeading(heading) {
+  if (!heading) return heading;
+  return heading
+    // "Section 3: Foo" or "section 2.1 Foo"
+    .replace(/^section\s+[\d.]+[\s:\-–]*/i, '')
+    // "2.1 Foo" or "3A Foo" or "4. Foo"
+    .replace(/^[\d]+[A-Za-z]?\.?\d*\.?\d*[\s:\-–]+/, '')
+    // lone uppercase letter prefix like "A Introduction"
+    .replace(/^[A-Z]\s+(?=[A-Z])/, '')
+    .trim();
+}
+
+// ─── Fullscreen modal (lives inside shadow DOM) ───────────────────────────────
+
+/**
+ * Show an SVG fullscreen inside the shadow root so it inherits z-index properly.
+ */
+function showCardFullscreen(svgHTML) {
+  if (!sidebarShadow) return;
+
+  // Reuse or create the modal shell
+  let modal = sidebarShadow.querySelector('#pl-fullscreen-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'pl-fullscreen-modal';
+    sidebarShadow.appendChild(modal);
+  }
+
+  modal.innerHTML = `
+    <div id="pl-fs-backdrop"></div>
+    <div id="pl-fs-box">
+      <button id="pl-fs-close" title="Close (Esc)">×</button>
+      <div id="pl-fs-content">${svgHTML}</div>
+    </div>
+  `;
+
+  // Style the modal elements directly (shadow DOM, so inline styles are safest)
+  Object.assign(modal.style, {
+    position: 'fixed',
+    inset: '0',
+    zIndex: '2147483647',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '40px',
+    animation: 'plFadeIn 0.18s ease',
+  });
+
+  const backdrop = modal.querySelector('#pl-fs-backdrop');
+  Object.assign(backdrop.style, {
+    position: 'absolute',
+    inset: '0',
+    background: 'rgba(0,0,0,0.88)',
+    backdropFilter: 'blur(4px)',
+  });
+
+  const box = modal.querySelector('#pl-fs-box');
+  Object.assign(box.style, {
+    position: 'relative',
+    background: 'white',
+    borderRadius: '14px',
+    padding: '28px',
+    maxWidth: '90vw',
+    maxHeight: '90vh',
+    overflow: 'auto',
+    boxShadow: '0 30px 80px rgba(0,0,0,0.7)',
+    animation: 'plScaleIn 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
+    zIndex: '1',
+  });
+
+  const closeBtn = modal.querySelector('#pl-fs-close');
+  Object.assign(closeBtn.style, {
+    position: 'absolute',
+    top: '10px',
+    right: '12px',
+    width: '32px',
+    height: '32px',
+    borderRadius: '50%',
+    background: 'rgba(0,0,0,0.08)',
+    border: 'none',
+    fontSize: '20px',
+    lineHeight: '1',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: '#333',
+    zIndex: '2',
+    transition: 'background 0.15s',
+  });
+
+  const content = modal.querySelector('#pl-fs-content');
+  Object.assign(content.style, {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  });
+
+  // Make the SVG fill the box nicely
+  const svgEl = content.querySelector('svg');
+  if (svgEl) {
+    svgEl.style.width = 'min(80vw, 900px)';
+    svgEl.style.height = 'auto';
+    svgEl.style.maxHeight = '80vh';
+    svgEl.removeAttribute('width');
+    svgEl.removeAttribute('height');
+  }
+
+  // Close logic
+  const close = () => { modal.style.display = 'none'; };
+  closeBtn.addEventListener('click', close);
+  backdrop.addEventListener('click', close);
+
+  const keyHandler = (e) => {
+    if (e.key === 'Escape') {
+      close();
+      document.removeEventListener('keydown', keyHandler);
+    }
+  };
+  document.addEventListener('keydown', keyHandler);
+
+  modal.style.display = 'flex';
+}
+
+// ─── Sorting ──────────────────────────────────────────────────────────────────
+
+/**
+ * Re-order rendered cards to match the original plan order so visuals
+ * that arrive out of sequence don't scramble the list.
+ */
+function sortCardsToMatchPlan() {
+  if (!planOrder.length) return;
+  const container = querySidebar('#pl-cards-container');
+  if (!container) return;
+
+  const cards = querySidebarAll('.pl-card');
+  cards.sort((a, b) => {
+    const ai = planOrder.indexOf(a.id);
+    const bi = planOrder.indexOf(b.id);
+    return (ai === -1 ? 9999 : ai) - (bi === -1 ? 9999 : bi);
+  });
+  cards.forEach(c => container.appendChild(c));
+}
+
+// ─── SVG injection helper (DRY) ───────────────────────────────────────────────
+
+/**
+ * Inject a cleaned SVG into a card body and wire up click-to-expand.
+ */
+function injectSVGIntoCard(cardBody, rawSvg) {
+  const cleanSvg = rawSvg.replace(/<script[\s\S]*?<\/script>/gi, '');
+
+  cardBody.innerHTML = `<div class="napkin-visual-wrapper">${cleanSvg}</div>`;
+
+  const svgEl = cardBody.querySelector('svg');
+  if (svgEl) {
+    svgEl.style.width = '100%';
+    svgEl.style.height = 'auto';
+    svgEl.removeAttribute('width');
+    svgEl.removeAttribute('height');
+  }
+
+  // Click-to-expand fullscreen
+  const wrapper = cardBody.querySelector('.napkin-visual-wrapper');
+  if (wrapper) {
+    wrapper.addEventListener('click', () => showCardFullscreen(cleanSvg));
+  }
+}
+
+// ─── No-content / server-down states ─────────────────────────────────────────
+
 function showNoContentMessage(reason) {
   if (!sidebarShadow) return;
   noContentShown = true;
@@ -41,13 +224,9 @@ function showNoContentMessage(reason) {
   const container = querySidebar('#pl-cards-container');
   if (!container) return;
 
-  // Hide progress area cleanly
   const progressArea = querySidebar('#pl-progress-area');
-  if (progressArea) {
-    progressArea.style.display = 'none';
-  }
+  if (progressArea) progressArea.style.display = 'none';
 
-  // Remove banner from page
   const banner = document.getElementById('paperlens-banner');
   if (banner) banner.remove();
 
@@ -87,43 +266,27 @@ function showNoContentMessage(reason) {
           </svg>
           Retry Analysis
         </button>
-        <button class="pl-highlight-tip-btn" id="pl-close-no-content">
-          Close
-        </button>
+        <button class="pl-highlight-tip-btn" id="pl-close-no-content">Close</button>
       </div>
     </div>
   `;
 
-  // Wire up retry button
-  const retryBtn = querySidebar('#pl-retry-analysis');
-  if (retryBtn) {
-    retryBtn.addEventListener('click', () => {
-      noContentShown = false;
-      // Re-trigger agentic analysis
-      closeSidebar();
-      setTimeout(() => {
-        // Trigger fresh analysis
-        const event = new KeyboardEvent('keydown', {
-          key: 'A', ctrlKey: true, shiftKey: true, bubbles: true
-        });
-        document.dispatchEvent(event);
-      }, 300);
-    });
-  }
+  querySidebar('#pl-retry-analysis')?.addEventListener('click', () => {
+    noContentShown = false;
+    closeSidebar();
+    setTimeout(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'A', ctrlKey: true, shiftKey: true, bubbles: true,
+      }));
+    }, 300);
+  });
 
-  const closeBtn = querySidebar('#pl-close-no-content');
-  if (closeBtn) {
-    closeBtn.addEventListener('click', closeSidebar);
-  }
+  querySidebar('#pl-close-no-content')?.addEventListener('click', closeSidebar);
 }
 
-/**
- * Show server-down error state inside the sidebar (replaces the spinner)
- */
 function showServerDownState() {
   if (!sidebarShadow) return;
 
-  // Stop the progress bar / scanning text
   const progressArea = querySidebar('#pl-progress-area');
   if (progressArea) progressArea.style.display = 'none';
 
@@ -140,9 +303,7 @@ function showServerDownState() {
         </svg>
       </div>
       <div class="pl-empty-title" style="color:#f87171;">Server not running</div>
-      <div class="pl-empty-reason">
-        PaperLens needs its local server to analyze pages.
-      </div>
+      <div class="pl-empty-reason">PaperLens needs its local server to analyze pages.</div>
 
       <div class="pl-empty-tips">
         <div class="pl-tips-label">Start the server</div>
@@ -171,9 +332,7 @@ function showServerDownState() {
     </div>
   `;
 
-  // Retry: re-run the analysis
   querySidebar('#pl-retry-server')?.addEventListener('click', async () => {
-    // Reset UI to loading state
     container.innerHTML = `
       <div class="pl-paper-title" id="pl-paper-title" style="display:none;"></div>
       <div class="pl-empty" id="pl-empty-state" style="color:#3d3d50;font-size:12px;padding:24px 16px;text-align:center;">Scanning sections…</div>
@@ -191,14 +350,10 @@ function showServerDownState() {
   querySidebar('#pl-close-server-err')?.addEventListener('click', closeSidebar);
 }
 
-/**
- * Update progress bar
- */
+// ─── Progress ─────────────────────────────────────────────────────────────────
+
 function updateProgress() {
   if (!sidebarShadow) return;
-
-  const cardsContainer = querySidebar('#pl-cards-container');
-  if (!cardsContainer) return;
 
   const allCards = querySidebarAll('.pl-card');
   if (allCards.length === 0) return;
@@ -207,9 +362,7 @@ function updateProgress() {
   const percentage = Math.round((completedCards / allCards.length) * 100);
 
   const progressFill = querySidebar('#pl-progress-fill');
-  if (progressFill) {
-    progressFill.style.width = `${Math.max(10, percentage)}%`;
-  }
+  if (progressFill) progressFill.style.width = `${Math.max(10, percentage)}%`;
 
   const progressText = querySidebar('#pl-progress-text');
   if (progressText && completedCards > 0) {
@@ -217,9 +370,8 @@ function updateProgress() {
   }
 }
 
-/**
- * Show error toast
- */
+// ─── Error toast ──────────────────────────────────────────────────────────────
+
 function showError(message) {
   console.error('[PaperLens] Error:', message);
 
@@ -291,18 +443,8 @@ function showError(message) {
   setTimeout(dismiss, 6000);
 }
 
-/**
- * Escape HTML
- */
-function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.appendChild(document.createTextNode(text));
-  return div.innerHTML;
-}
+// ─── CSS ──────────────────────────────────────────────────────────────────────
 
-/**
- * Get sidebar CSS
- */
 function getSidebarCSS() {
   return `
     *, *::before, *::after {
@@ -314,6 +456,26 @@ function getSidebarCSS() {
     :host {
       all: initial;
       display: block;
+    }
+
+    @keyframes plFadeIn {
+      from { opacity: 0; }
+      to   { opacity: 1; }
+    }
+
+    @keyframes plScaleIn {
+      from { opacity: 0; transform: scale(0.92); }
+      to   { opacity: 1; transform: scale(1); }
+    }
+
+    @keyframes cardSlideIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes shimmer {
+      0%   { transform: translateX(-100%); }
+      100% { transform: translateX(100%); }
     }
 
     #paperlens-sidebar {
@@ -334,7 +496,7 @@ function getSidebarCSS() {
       font-size: 13px;
     }
 
-    /* Header */
+    /* ── Header ── */
     .pl-header {
       display: flex;
       justify-content: space-between;
@@ -397,11 +559,11 @@ function getSidebarCSS() {
 
     .pl-collapse:hover, .pl-close:hover {
       background: #1c1c24;
-      border-color: #2a2a38;
       color: #a1a1aa;
+      border-color: #3a3a4a;
     }
 
-    /* Progress */
+    /* ── Progress ── */
     .pl-progress-area {
       padding: 10px 18px;
       border-bottom: 1px solid #1e1e28;
@@ -431,7 +593,7 @@ function getSidebarCSS() {
       width: 0%;
     }
 
-    /* Cards container */
+    /* ── Cards container ── */
     .pl-cards {
       flex: 1;
       overflow-y: auto;
@@ -442,36 +604,19 @@ function getSidebarCSS() {
       gap: 10px;
     }
 
-    .pl-cards::-webkit-scrollbar {
-      width: 5px;
-    }
+    .pl-cards::-webkit-scrollbar { width: 5px; }
+    .pl-cards::-webkit-scrollbar-track { background: transparent; }
+    .pl-cards::-webkit-scrollbar-thumb { background: #2a2a38; border-radius: 3px; }
+    .pl-cards::-webkit-scrollbar-thumb:hover { background: #3a3a4a; }
 
-    .pl-cards::-webkit-scrollbar-track {
-      background: transparent;
-    }
-
-    .pl-cards::-webkit-scrollbar-thumb {
-      background: #2a2a38;
-      border-radius: 3px;
-    }
-
-    .pl-cards::-webkit-scrollbar-thumb:hover {
-      background: #3a3a4a;
-    }
-
-    /* Individual card */
+    /* ── Individual card ── */
     .pl-card {
       background: #111118;
       border: 1px solid #1e1e28;
       border-radius: 10px;
-      overflow: hidden;
-      transition: border-color 0.2s ease;
+      overflow: visible;          /* must be visible so tall SVGs aren't clipped */
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
       animation: cardSlideIn 0.25s ease forwards;
-    }
-
-    @keyframes cardSlideIn {
-      from { opacity: 0; transform: translateY(8px); }
-      to { opacity: 1; transform: translateY(0); }
     }
 
     .pl-card:hover {
@@ -481,10 +626,9 @@ function getSidebarCSS() {
     .pl-card-header {
       display: flex;
       justify-content: space-between;
-      align-items: center;
+      align-items: flex-start;    /* flex-start so multiline titles look right */
       padding: 10px 14px;
-      cursor: pointer;
-      user-select: none;
+      gap: 8px;
     }
 
     .pl-card-title {
@@ -492,9 +636,9 @@ function getSidebarCSS() {
       font-weight: 600;
       color: #d4d4d8;
       flex: 1;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      line-height: 1.45;
+      white-space: normal;        /* allow wrapping — no more ellipsis truncation */
+      word-break: break-word;
     }
 
     .pl-card-meta {
@@ -502,6 +646,7 @@ function getSidebarCSS() {
       align-items: center;
       gap: 6px;
       flex-shrink: 0;
+      padding-top: 1px;
     }
 
     .pl-card-type {
@@ -513,15 +658,16 @@ function getSidebarCSS() {
       border-radius: 4px;
       text-transform: uppercase;
       letter-spacing: 0.06em;
+      white-space: nowrap;
     }
 
     .pl-card-body {
       padding: 0 14px 14px;
     }
 
-    /* Loading skeleton */
+    /* ── Loading skeleton ── */
     .pl-skeleton {
-      height: 160px;
+      height: 200px;              /* was 160px — taller so it hints at real diagram size */
       background: #16161e;
       border-radius: 8px;
       position: relative;
@@ -536,12 +682,7 @@ function getSidebarCSS() {
       animation: shimmer 1.6s infinite;
     }
 
-    @keyframes shimmer {
-      0% { transform: translateX(-100%); }
-      100% { transform: translateX(100%); }
-    }
-
-    /* Timer */
+    /* ── Timer ── */
     .pl-timer {
       font-size: 10px;
       color: #52525b;
@@ -549,22 +690,48 @@ function getSidebarCSS() {
       padding: 4px 0 8px;
     }
 
-    /* SVG visual wrapper */
+    /* ── SVG visual wrapper ── */
     .napkin-visual-wrapper {
       background: white;
       border-radius: 8px;
-      padding: 8px;
-      margin-top: 4px;
-      overflow: hidden;
+      padding: 10px;
+      margin-top: 6px;
+      overflow: visible;          /* was hidden — was clipping tall SVGs */
+      cursor: zoom-in;
+      position: relative;
+      transition: box-shadow 0.15s ease, transform 0.15s ease;
+    }
+
+    .napkin-visual-wrapper:hover {
+      box-shadow: 0 0 0 2px #6366f1, 0 4px 20px rgba(0,0,0,0.35);
+      transform: translateY(-1px);
+    }
+
+    /* Expand hint icon */
+    .napkin-visual-wrapper::after {
+      content: '⤢';
+      position: absolute;
+      top: 6px;
+      right: 8px;
+      font-size: 14px;
+      color: rgba(0,0,0,0.2);
+      pointer-events: none;
+      transition: color 0.15s;
+      line-height: 1;
+    }
+
+    .napkin-visual-wrapper:hover::after {
+      color: rgba(99, 102, 241, 0.65);
     }
 
     .napkin-visual-wrapper svg {
       display: block;
       width: 100% !important;
       height: auto !important;
+      min-height: 160px;          /* guarantees a visible diagram area */
     }
 
-    /* Error state */
+    /* ── Error state ── */
     .pl-error {
       font-size: 11px;
       color: #f87171;
@@ -575,7 +742,7 @@ function getSidebarCSS() {
       line-height: 1.5;
     }
 
-    /* Empty state */
+    /* ── Empty state ── */
     .pl-empty {
       text-align: center;
       padding: 32px 16px;
@@ -584,7 +751,6 @@ function getSidebarCSS() {
       line-height: 1.7;
     }
 
-    /* ===== IMPROVED EMPTY / NO-CONTENT STATE ===== */
     .pl-empty-state {
       padding: 28px 20px 20px;
       display: flex;
@@ -644,9 +810,7 @@ function getSidebarCSS() {
       line-height: 1.5;
     }
 
-    .pl-tip-item:last-child {
-      margin-bottom: 0;
-    }
+    .pl-tip-item:last-child { margin-bottom: 0; }
 
     .pl-tip-icon {
       color: #6366f1;
@@ -704,7 +868,7 @@ function getSidebarCSS() {
       border-color: #3a3a4a;
     }
 
-    /* Paper title */
+    /* ── Paper title ── */
     .pl-paper-title {
       font-size: 12px;
       font-weight: 600;
@@ -717,13 +881,13 @@ function getSidebarCSS() {
       white-space: nowrap;
     }
 
-    /* Single visual */
+    /* ── Single visual ── */
     .pl-single-visual {
       width: 100%;
       padding: 4px;
     }
 
-    /* Segment */
+    /* ── Segment ── */
     .pl-segment {
       margin-top: 10px;
       padding-top: 10px;
@@ -739,7 +903,7 @@ function getSidebarCSS() {
       margin-bottom: 6px;
     }
 
-    /* Selected text preview */
+    /* ── Selected text preview ── */
     .pl-selected-text {
       background: #111118;
       border: 1px solid #1e1e28;
@@ -765,7 +929,7 @@ function getSidebarCSS() {
       overflow-y: auto;
     }
 
-    /* Collapsed state */
+    /* ── Collapsed state ── */
     #paperlens-sidebar.pl-collapsed .pl-cards,
     #paperlens-sidebar.pl-collapsed .pl-progress-area {
       display: none;
@@ -776,7 +940,7 @@ function getSidebarCSS() {
       display: none;
     }
 
-    /* Resize handle */
+    /* ── Resize handle ── */
     .pl-resize-handle {
       position: absolute;
       top: 0;
@@ -794,9 +958,8 @@ function getSidebarCSS() {
   `;
 }
 
-/**
- * Get sidebar HTML
- */
+// ─── HTML ─────────────────────────────────────────────────────────────────────
+
 function getSidebarHTML(mode, options = {}) {
   const selectedTextSection = (mode === 'SINGLE' && options.selectedText) ? `
     <div class="pl-selected-text">
@@ -864,9 +1027,8 @@ function getSidebarHTML(mode, options = {}) {
   }
 }
 
-/**
- * Create sidebar using Shadow DOM
- */
+// ─── Sidebar lifecycle ────────────────────────────────────────────────────────
+
 function createSidebar(mode, options = {}) {
   const existing = document.getElementById('paperlens-host');
   if (existing) existing.remove();
@@ -907,9 +1069,6 @@ function createSidebar(mode, options = {}) {
   return shadow;
 }
 
-/**
- * Apply webpage shifting
- */
 function applyWebpageShifting(sidebarWidth) {
   const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
   const minContentWidth = 720;
@@ -959,9 +1118,6 @@ function applyWebpageShifting(sidebarWidth) {
   document.body.style.setProperty('overflow-x', 'hidden', 'important');
 }
 
-/**
- * Add resize handle
- */
 function addResizeHandle(sidebarElement, hostElement) {
   const resizeHandle = document.createElement('div');
   resizeHandle.className = 'pl-resize-handle';
@@ -1010,9 +1166,6 @@ function addResizeHandle(sidebarElement, hostElement) {
   }
 }
 
-/**
- * Toggle sidebar collapse
- */
 function toggleSidebarCollapse() {
   if (!sidebar || !sidebarHost) return;
   sidebar._isCollapsed = !sidebar._isCollapsed;
@@ -1032,9 +1185,6 @@ function toggleSidebarCollapse() {
   }
 }
 
-/**
- * Close sidebar
- */
 function closeSidebar() {
   if (sidebar && sidebar._resizeHandle && sidebar._resizeHandle._cleanup) {
     sidebar._resizeHandle._cleanup();
@@ -1050,6 +1200,7 @@ function closeSidebar() {
   isSidebarOpen = false;
   currentMode = null;
   noContentShown = false;
+  planOrder = [];
 
   document.body.classList.remove('paperlens-sidebar-open', 'paperlens-sidebar-overlay');
   document.documentElement.classList.remove('paperlens-sidebar-open', 'paperlens-sidebar-overlay');
@@ -1067,9 +1218,6 @@ function closeSidebar() {
   document.body.style.removeProperty('overflow-x');
 }
 
-/**
- * Show sidebar
- */
 function showSidebar(mode, options = {}) {
   const isChromePDF = window.location.protocol === 'chrome-extension:' &&
     window.location.hostname.includes('mhjfbmdgcfjbbpaeojofohoefgiehjai');
@@ -1130,9 +1278,8 @@ function showSidebar(mode, options = {}) {
   addResizeHandle(sidebar, sidebarHost);
 }
 
-/**
- * Create a section card
- */
+// ─── Card factory ─────────────────────────────────────────────────────────────
+
 function createSectionCard(sectionId, heading, diagramType) {
   const card = document.createElement('div');
   card.className = 'pl-card';
@@ -1145,9 +1292,12 @@ function createSectionCard(sectionId, heading, diagramType) {
     comparison: 'Compare',
   };
 
+  // Strip section numbers for a polished display title
+  const displayHeading = cleanHeading(heading);
+
   card.innerHTML = `
     <div class="pl-card-header">
-      <div class="pl-card-title" title="${escapeHtml(heading)}">${escapeHtml(heading)}</div>
+      <div class="pl-card-title" title="${escapeHtml(heading)}">${escapeHtml(displayHeading)}</div>
       <div class="pl-card-meta">
         ${diagramType ? `<span class="pl-card-type">${typeLabels[diagramType] || diagramType}</span>` : ''}
       </div>
@@ -1161,9 +1311,6 @@ function createSectionCard(sectionId, heading, diagramType) {
   return card;
 }
 
-/**
- * Start card timer
- */
 function startCardTimer(sectionId) {
   const timerEl = querySidebar(`#pl-timer-${sectionId}`);
   if (!timerEl) return null;
@@ -1181,7 +1328,7 @@ function startCardTimer(sectionId) {
   return interval;
 }
 
-// =================== MESSAGE LISTENER ===================
+// ─── Message listener ─────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
@@ -1190,9 +1337,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     document.dispatchEvent(evt);
   }
 
-  // ── 'plan' event: server sends the visualization plan ──────────────────────
+  // ── plan: skeleton cards in plan order ───────────────────────────────────────
   if (message.type === 'plan') {
-    console.log('[PaperLens] plan received:', message.data?.length, 'sections, hasContent:', message.hasVisualizableContent);
+    console.log('[PaperLens] plan received:', message.data?.length, 'sections');
     if (!sidebarShadow) return;
 
     const plan = message.data || [];
@@ -1210,39 +1357,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const container = querySidebar('#pl-cards-container');
     if (!container) return;
 
-    // Create a card for each planned section
+    // Create cards in plan order and record that order for later sorting
+    planOrder = [];
     plan.filter(p => !p.skip).forEach(planItem => {
       const card = createSectionCard(planItem.sectionId, planItem.heading, planItem.diagramType);
       container.appendChild(card);
+      planOrder.push(card.id);
       const interval = startCardTimer(planItem.sectionId);
       if (interval) card.dataset.timerInterval = interval;
     });
 
-    // Remove banner
     const banner = document.getElementById('paperlens-banner');
     if (banner) banner.remove();
   }
 
-  // ── 'diagram' event: server sends a completed SVG ──────────────────────────
+  // ── diagram: SVG from server ─────────────────────────────────────────────────
   if (message.type === 'diagram') {
     console.log('[PaperLens] diagram received for:', message.sectionId, 'svg length:', message.svg?.length);
     if (!sidebarShadow) return;
 
     const { sectionId, svg, heading } = message;
 
-    // The executor may send combined IDs like "section-0-segment-1"
-    // Try exact match first, then prefix match
     let card = querySidebar(`#pl-card-${sectionId}`);
     let cardBody = querySidebar(`#pl-body-${sectionId}`);
 
     if (!card) {
-      // Try matching the base section ID (strip segment suffix)
       const baseId = sectionId.replace(/-segment-\d+$/, '').replace(/-\d+$/, '');
       card = querySidebar(`#pl-card-${baseId}`);
       cardBody = querySidebar(`#pl-body-${baseId}`);
 
       if (!card) {
-        // Create a new card on the fly (segment arrived without section_start)
         const container = querySidebar('#pl-cards-container');
         if (container) {
           const newCard = createSectionCard(sectionId, heading || sectionId, null);
@@ -1262,23 +1406,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (timerEl) timerEl.remove();
 
     if (svg && svg.trim()) {
-      const cleanSvg = svg.replace(/<script[\s\S]*?<\/script>/gi, '');
-      cardBody.innerHTML = `<div class="napkin-visual-wrapper">${cleanSvg}</div>`;
-      const svgEl = cardBody.querySelector('svg');
-      if (svgEl) {
-        svgEl.style.width = '100%';
-        svgEl.style.height = 'auto';
-        svgEl.removeAttribute('width');
-        svgEl.removeAttribute('height');
-      }
+      injectSVGIntoCard(cardBody, svg);
     } else {
       cardBody.innerHTML = '<div class="pl-error">Visual unavailable for this section.</div>';
     }
 
-    setTimeout(updateProgress, 100);
+    setTimeout(() => { updateProgress(); sortCardsToMatchPlan(); }, 100);
   }
 
-  // ── 'section_start' event (alternative flow) ───────────────────────────────
+  // ── section_start (alternative flow) ────────────────────────────────────────
   if (message.type === 'section_start') {
     const { sectionId, heading, diagramType } = message;
     if (!sidebarShadow) return;
@@ -1286,58 +1422,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const container = querySidebar('#pl-cards-container');
     if (!container) return;
 
-    // Remove initial empty state
     const emptyState = querySidebar('#pl-empty-state');
     if (emptyState) emptyState.remove();
 
     const card = createSectionCard(sectionId, heading, diagramType);
     container.appendChild(card);
+    if (!planOrder.includes(card.id)) planOrder.push(card.id);
 
-    // Start timer
     const interval = startCardTimer(sectionId);
     if (interval) card.dataset.timerInterval = interval;
   }
 
+  // ── section_complete ─────────────────────────────────────────────────────────
   if (message.type === 'section_complete') {
-    const { sectionId, svg, heading } = message;
+    const { sectionId, svg } = message;
     if (!sidebarShadow) return;
 
-    const baseSectionId = sectionId.includes('-') ? sectionId : sectionId;
-    const card = querySidebar(`#pl-card-${baseSectionId}`);
-
-    if (!card) {
-      // Card might use combined ID — find by partial
-      const allCards = querySidebarAll('.pl-card');
-      const matchCard = allCards.find(c => c.id.startsWith(`pl-card-${baseSectionId}`));
-      if (!matchCard) return;
-    }
-
-    const cardBody = querySidebar(`#pl-body-${baseSectionId}`);
+    const card = querySidebar(`#pl-card-${sectionId}`);
+    const cardBody = querySidebar(`#pl-body-${sectionId}`);
     if (!cardBody) return;
 
-    // Clear timer
-    const timerEl = querySidebar(`#pl-timer-${baseSectionId}`);
+    const timerEl = querySidebar(`#pl-timer-${sectionId}`);
     if (timerEl) timerEl.remove();
     const timerInterval = card?.dataset.timerInterval;
     if (timerInterval) clearInterval(parseInt(timerInterval));
 
     if (svg && svg.trim()) {
-      const cleanSvg = svg.replace(/<script[\s\S]*?<\/script>/gi, '');
-      cardBody.innerHTML = `<div class="napkin-visual-wrapper">${cleanSvg}</div>`;
-      const svgEl = cardBody.querySelector('svg');
-      if (svgEl) {
-        svgEl.style.width = '100%';
-        svgEl.style.height = 'auto';
-        svgEl.removeAttribute('width');
-        svgEl.removeAttribute('height');
-      }
+      injectSVGIntoCard(cardBody, svg);
     } else {
       cardBody.innerHTML = '<div class="pl-error">Visual unavailable for this section.</div>';
     }
 
-    setTimeout(updateProgress, 100);
+    setTimeout(() => { updateProgress(); sortCardsToMatchPlan(); }, 100);
   }
 
+  // ── section_error ────────────────────────────────────────────────────────────
   if (message.type === 'section_error') {
     const { sectionId, message: errorMsg } = message;
     if (!sidebarShadow) return;
@@ -1356,16 +1475,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
   }
 
+  // ── no_content ───────────────────────────────────────────────────────────────
   if (message.type === 'no_content') {
     showNoContentMessage(message.reason || 'No visualizable content found on this page');
   }
 
+  // ── error ────────────────────────────────────────────────────────────────────
   if (message.type === 'error') {
     showError(message.message || 'An error occurred');
     const banner = document.getElementById('paperlens-banner');
     if (banner) banner.remove();
   }
 
+  // ── AGENT_ERROR ──────────────────────────────────────────────────────────────
   if (message.type === 'AGENT_ERROR') {
     const banner = document.getElementById('paperlens-banner');
     if (banner) banner.remove();
@@ -1384,6 +1506,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
   }
 
+  // ── complete / AGENT_COMPLETE ────────────────────────────────────────────────
   if (message.type === 'complete' || message.type === 'AGENT_COMPLETE') {
     updateProgress();
 
@@ -1396,7 +1519,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const progressFill = querySidebar('#pl-progress-fill');
     if (progressFill) progressFill.style.width = '100%';
 
-    // Fade out progress bar after 2s if visuals are showing
+    // Fade out progress bar after 2 s
     setTimeout(() => {
       const progressArea = querySidebar('#pl-progress-area');
       if (progressArea && !noContentShown) {
@@ -1408,7 +1531,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
     }, 2000);
 
-    // Check if anything was rendered
     const allCards = querySidebarAll('.pl-card');
     const cardsWithVisuals = querySidebarAll('.pl-card svg');
     const cardsWithErrors = querySidebarAll('.pl-card .pl-error');
@@ -1419,81 +1541,228 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-/**
- * Show visualize button
- */
+// ─── Agentic analysis ─────────────────────────────────────────────────────────
+
+async function triggerAgenticAnalysis() {
+  console.log('[PaperLens] triggerAgenticAnalysis started');
+
+  const existingBanner = document.getElementById('paperlens-banner');
+  if (existingBanner) existingBanner.remove();
+
+  const banner = document.createElement('div');
+  banner.id = 'paperlens-banner';
+  Object.assign(banner.style, {
+    position: 'fixed',
+    top: '0',
+    left: '0',
+    right: '420px',
+    zIndex: '2147483646',
+    background: 'linear-gradient(90deg, rgba(99,102,241,0.12), rgba(99,102,241,0.06))',
+    borderBottom: '1px solid rgba(99,102,241,0.2)',
+    color: '#a5b4fc',
+    padding: '10px 16px',
+    fontSize: '12px',
+    fontWeight: '600',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    letterSpacing: '0.02em',
+  });
+  banner.textContent = '✦ PaperLens is analyzing this page…';
+  document.body.insertBefore(banner, document.body.firstChild);
+
+  try {
+    console.log('[PaperLens] Checking server health at', SERVER_URL);
+    try {
+      const healthRes = await fetch(`${SERVER_URL}/health`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(5000),
+      });
+      console.log('[PaperLens] Server health:', healthRes.status, healthRes.ok);
+      if (!healthRes.ok) {
+        banner.remove();
+        showServerDownState();
+        return;
+      }
+    } catch (healthErr) {
+      console.warn('[PaperLens] Server health check failed:', healthErr.message);
+      banner.remove();
+      showServerDownState();
+      return;
+    }
+
+    console.log('[PaperLens] Extracting page structure...');
+    const paperData = window.extractPaperStructure ? window.extractPaperStructure() : null;
+    if (!paperData) {
+      showError('Could not extract page content.');
+      banner.remove();
+      return;
+    }
+    console.log('[PaperLens] Extracted:', paperData.sections.length, 'sections,', paperData.totalWordCount, 'words');
+
+    if (paperData.isPDF) {
+      showError('PDF files cannot be analyzed directly. Please use the HTML version.');
+      banner.remove();
+      return;
+    }
+
+    if (paperData.sections.length === 0) {
+      banner.remove();
+      showNoContentMessage('No text sections could be extracted from this page.');
+      return;
+    }
+
+    const titleEl = querySidebar('#pl-paper-title');
+    if (titleEl) {
+      titleEl.textContent = paperData.title || 'Page Analysis';
+      titleEl.style.display = 'block';
+    }
+
+    console.log('[PaperLens] Sending ANALYZE_PAPER to background...');
+    chrome.runtime.sendMessage({ type: 'ANALYZE_PAPER', paperData });
+    console.log('[PaperLens] ANALYZE_PAPER sent — waiting for SSE events...');
+
+  } catch (error) {
+    console.error('[PaperLens] triggerAgenticAnalysis error:', error);
+    banner.remove();
+    const progressArea = querySidebar('#pl-progress-area');
+    if (progressArea) progressArea.style.display = 'none';
+    showError('Analysis failed: ' + error.message);
+  }
+}
+
+function pingBackground() {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ type: 'PING' }, (response) => {
+        if (chrome.runtime.lastError) { resolve(false); return; }
+        resolve(response && (response.ok === true || response.status === 'ok'));
+      });
+    } catch (e) {
+      resolve(false);
+    }
+  });
+}
+
+// ─── Manual highlight mode ────────────────────────────────────────────────────
+
+let ctrlAPressed = false;
+let ctrlAPressTime = 0;
+
+function handleManualHighlight() {
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+      ctrlAPressed = true;
+      ctrlAPressTime = Date.now();
+    }
+  });
+
+  document.addEventListener('mouseup', (e) => {
+    if (isSidebarOpen) return;
+
+    setTimeout(() => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed) return;
+
+      const text = selection.toString().trim();
+      if (!text || text.length < 50) return;
+
+      const contentType = document.querySelector('meta[name="content-type"]')?.content || 'article';
+
+      let savedRange = null;
+      try {
+        savedRange = selection.getRangeAt(0).cloneRange();
+      } catch (e) { /* ignore */ }
+
+      const newText = document.body ? document.body.innerText.trim() : '';
+      const pageText = document.body ? document.body.innerText.trim() : '';
+
+      if (!pageText || newText.length > pageText.length * 0.8 || newText.length > 10000 ||
+          (pageText.length > 200 && newText.length === 0)) {
+        if (window.getSelection) window.getSelection()?.removeAllRanges();
+        showSidebar('AGENTIC');
+        triggerAgenticAnalysis();
+        return;
+      }
+
+      if (ctrlAPressed && Date.now() - ctrlAPressTime < 600) return;
+
+      try {
+        const range = selection.getRangeAt(0);
+        showVisualizeButton(range);
+      } catch (error) {
+        console.error('[Content] Error showing visualize button:', error);
+      }
+    }, 150);
+  });
+}
+
 function showVisualizeButton(range) {
-  const existing = document.getElementById('paperlens-viz-btn');
+  const existing = document.querySelector('.paperlens-visualize-btn');
   if (existing) existing.remove();
 
   const rect = range.getBoundingClientRect();
+  if (!rect || rect.width === 0) return;
+
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed) return;
+  const text = selection.toString().trim();
+  if (!text || text.length < 50) return;
+
+  let savedRange = null;
+  try { savedRange = selection.getRangeAt(0).cloneRange(); } catch (e) { /* ignore */ }
+
   const button = document.createElement('button');
-  button.id = 'paperlens-viz-btn';
+  button.className = 'paperlens-visualize-btn';
 
   Object.assign(button.style, {
     position: 'fixed',
     top: `${Math.max(8, rect.top - 44)}px`,
-    left: `${Math.max(8, Math.min(rect.left, window.innerWidth - 160))}px`,
+    left: `${Math.min(window.innerWidth - 180, rect.left + rect.width / 2 - 80)}px`,
     zIndex: '2147483646',
-    background: 'linear-gradient(135deg, #6366f1 0%, #818cf8 100%)',
+    background: 'linear-gradient(135deg, #6366f1, #818cf8)',
     color: 'white',
     border: 'none',
-    padding: '8px 14px',
-    borderRadius: '8px',
+    borderRadius: '20px',
+    padding: '8px 16px',
     fontSize: '12px',
-    fontWeight: '700',
-    cursor: 'pointer',
-    boxShadow: '0 4px 16px rgba(99, 102, 241, 0.4)',
+    fontWeight: '600',
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-    letterSpacing: '0.01em',
+    cursor: 'pointer',
+    boxShadow: '0 4px 16px rgba(99,102,241,0.4)',
     display: 'flex',
     alignItems: 'center',
     gap: '6px',
-    transition: 'transform 0.1s ease, box-shadow 0.1s ease',
+    transition: 'all 0.15s ease',
+    letterSpacing: '0.01em',
+    whiteSpace: 'nowrap',
   });
 
   button.innerHTML = `
     <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
       <circle cx="6" cy="6" r="5" stroke="white" stroke-width="1.5"/>
-      <circle cx="6" cy="6" r="2" fill="white"/>
+      <circle cx="6" cy="6" r="2.5" fill="white" opacity="0.7"/>
     </svg>
     Visualize
   `;
 
-  button.addEventListener('mouseenter', () => {
-    button.style.transform = 'scale(1.04)';
-    button.style.boxShadow = '0 6px 20px rgba(99, 102, 241, 0.5)';
-  });
-
-  button.addEventListener('mouseleave', () => {
-    button.style.transform = 'scale(1)';
-    button.style.boxShadow = '0 4px 16px rgba(99, 102, 241, 0.4)';
-  });
-
-  const text = range.toString().trim();
-  const contentType = detectContentType(text);
-  let highlightSpan = null;
-  let savedRange = null;
-
-  try {
-    savedRange = range.cloneRange();
-  } catch (e) { /* ignore */ }
+  const contentType = document.querySelector('meta[name="content-type"]')?.content || 'article';
 
   button._cleanup = () => {
-    if (button._selectionChangeHandler) {
-      document.removeEventListener('selectionchange', button._selectionChangeHandler);
-    }
+    clearTimeout(timeoutId);
+    document.removeEventListener('mousedown', outsideClickHandler);
+    button.remove();
   };
 
-  button.addEventListener('click', async (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    button.remove();
+  const outsideClickHandler = (e) => {
+    if (!button.contains(e.target)) button._cleanup?.();
+  };
 
-    if (!text || text.length < 15) {
-      showError('Please select at least a few words to visualize.');
-      return;
-    }
+  document.addEventListener('mousedown', outsideClickHandler, { once: false });
+
+  button.addEventListener('click', (e) => {
+    e.stopPropagation();
+    button._cleanup?.();
+
+    if (isSidebarOpen) return;
 
     showSidebar('SINGLE', { preserveSelection: true, selectedText: text });
 
@@ -1540,6 +1809,9 @@ function showVisualizeButton(range) {
               visualDiv.innerHTML = cleanSvg;
               const svgEl = visualDiv.querySelector('svg');
               if (svgEl) { svgEl.style.width = '100%'; svgEl.style.height = 'auto'; }
+              // Click-to-expand
+              visualDiv.style.cursor = 'zoom-in';
+              visualDiv.addEventListener('click', () => showCardFullscreen(cleanSvg));
             } else {
               visualDiv.innerHTML = '<div class="pl-error">Visual unavailable</div>';
             }
@@ -1552,6 +1824,11 @@ function showVisualizeButton(range) {
           container.innerHTML = `<div class="napkin-visual-wrapper">${cleanSvg}</div>`;
           const svgEl = container.querySelector('svg');
           if (svgEl) { svgEl.style.width = '100%'; svgEl.style.height = 'auto'; }
+          const wrapper = container.querySelector('.napkin-visual-wrapper');
+          if (wrapper) {
+            wrapper.style.cursor = 'zoom-in';
+            wrapper.addEventListener('click', () => showCardFullscreen(cleanSvg));
+          }
         } else if (response && response.error) {
           if (response.evaluationRejected) {
             const reason = response.reason || 'Content not suitable for visualization';
@@ -1572,204 +1849,11 @@ function showVisualizeButton(range) {
 
   const timeoutId = setTimeout(() => {
     button._cleanup?.();
-    button.remove();
-  }, 10000);
-
-  const selectionChangeHandler = () => {
-    const selection = window.getSelection();
-    if (!selection.rangeCount || selection.toString().trim() !== text) {
-      clearTimeout(timeoutId);
-      button._cleanup?.();
-      button.remove();
-      document.removeEventListener('selectionchange', selectionChangeHandler);
-    }
-  };
-
-  document.addEventListener('selectionchange', selectionChangeHandler);
-  button._selectionChangeHandler = selectionChangeHandler;
+  }, 8000);
 }
 
-/**
- * Detect content type
- */
-function detectContentType(text) {
-  if (/```|function |const |var |let |class |import |export /.test(text)) return 'code';
-  if (/\d+\.\s+|\n[-*]\s+/.test(text)) return 'list';
-  if (/abstract|introduction|methodology|results|conclusion/i.test(text)) return 'academic';
-  return 'text';
-}
+// ─── Agentic keyboard shortcut ────────────────────────────────────────────────
 
-/**
- * Handle manual highlight
- */
-function handleManualHighlight() {
-  let selectionTimeout = null;
-  let ctrlAPressed = false;
-  let ctrlAPressTime = 0;
-
-  document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'a' && !e.shiftKey) {
-      ctrlAPressed = true;
-      ctrlAPressTime = Date.now();
-      setTimeout(() => {
-        if (Date.now() - ctrlAPressTime > 400) ctrlAPressed = false;
-      }, 500);
-    }
-  });
-
-  document.addEventListener('mouseup', (e) => {
-    if (isSidebarOpen) return;
-    if (e.target?.id === 'paperlens-viz-btn') return;
-
-    if (selectionTimeout) clearTimeout(selectionTimeout);
-
-    selectionTimeout = setTimeout(() => {
-      const selection = window.getSelection();
-      if (!selection || !selection.rangeCount) return;
-
-      const newText = selection.toString().trim();
-      if (!newText || newText.length < 15) return;
-
-      const pageText = document.body ? document.body.innerText.trim() : '';
-
-      if (!pageText || newText.length > pageText.length * 0.8 || newText.length > 10000 || (pageText.length > 200 && newText.length === 0)) {
-        if (window.getSelection) window.getSelection()?.removeAllRanges();
-        showSidebar('AGENTIC');
-        triggerAgenticAnalysis();
-        return;
-      }
-
-      if (ctrlAPressed && Date.now() - ctrlAPressTime < 600) {
-        return;
-      }
-
-      try {
-        const range = selection.getRangeAt(0);
-        showVisualizeButton(range);
-      } catch (error) {
-        console.error('[Content] Error showing visualize button:', error);
-      }
-    }, 150);
-  });
-}
-
-/**
- * Trigger agentic analysis
- */
-async function triggerAgenticAnalysis() {
-  console.log('[PaperLens] triggerAgenticAnalysis started');
-
-  // Remove any existing banner
-  const existingBanner = document.getElementById('paperlens-banner');
-  if (existingBanner) existingBanner.remove();
-
-  const banner = document.createElement('div');
-  banner.id = 'paperlens-banner';
-  Object.assign(banner.style, {
-    position: 'fixed',
-    top: '0',
-    left: '0',
-    right: '420px',
-    zIndex: '2147483646',
-    background: 'linear-gradient(90deg, rgba(99,102,241,0.12), rgba(99,102,241,0.06))',
-    borderBottom: '1px solid rgba(99,102,241,0.2)',
-    color: '#a5b4fc',
-    padding: '10px 16px',
-    fontSize: '12px',
-    fontWeight: '600',
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-    letterSpacing: '0.02em',
-  });
-  banner.textContent = '✦ PaperLens is analyzing this page…';
-  document.body.insertBefore(banner, document.body.firstChild);
-
-  try {
-    // Step 1: Check server is actually reachable directly from content script
-    console.log('[PaperLens] Checking server health at', SERVER_URL);
-    try {
-      const healthRes = await fetch(`${SERVER_URL}/health`, {
-        method: 'GET',
-        signal: AbortSignal.timeout(5000),
-      });
-      console.log('[PaperLens] Server health:', healthRes.status, healthRes.ok);
-      if (!healthRes.ok) {
-        banner.remove();
-        showServerDownState();
-        return;
-      }
-    } catch (healthErr) {
-      console.warn('[PaperLens] Server health check failed:', healthErr.message);
-      banner.remove();
-      showServerDownState();
-      return;
-    }
-
-    // Step 2: Extract page content
-    console.log('[PaperLens] Extracting page structure...');
-    const paperData = window.extractPaperStructure ? window.extractPaperStructure() : null;
-    if (!paperData) {
-      showError('Could not extract page content.');
-      banner.remove();
-      return;
-    }
-    console.log('[PaperLens] Extracted:', paperData.sections.length, 'sections,', paperData.totalWordCount, 'words');
-
-    if (paperData.isPDF) {
-      showError('PDF files cannot be analyzed directly. Please use the HTML version.');
-      banner.remove();
-      return;
-    }
-
-    if (paperData.sections.length === 0) {
-      banner.remove();
-      showNoContentMessage('No text sections could be extracted from this page.');
-      return;
-    }
-
-    // Step 3: Update sidebar title
-    const titleEl = querySidebar('#pl-paper-title');
-    if (titleEl) {
-      titleEl.textContent = paperData.title || 'Page Analysis';
-      titleEl.style.display = 'block';
-    }
-
-    // Step 4: Send to background for SSE streaming
-    console.log('[PaperLens] Sending ANALYZE_PAPER to background...');
-    chrome.runtime.sendMessage({ type: 'ANALYZE_PAPER', paperData });
-    console.log('[PaperLens] ANALYZE_PAPER sent — waiting for SSE events...');
-
-  } catch (error) {
-    console.error('[PaperLens] triggerAgenticAnalysis error:', error);
-    banner.remove();
-    const progressArea = querySidebar('#pl-progress-area');
-    if (progressArea) progressArea.style.display = 'none';
-    showError('Analysis failed: ' + error.message);
-  }
-}
-
-/**
- * Ping background service
- */
-function pingBackground() {
-  return new Promise((resolve) => {
-    try {
-      chrome.runtime.sendMessage({ type: 'PING' }, (response) => {
-        if (chrome.runtime.lastError) {
-          resolve(false);
-          return;
-        }
-        // Background sends { status: 'ok' } — accept either .ok or .status === 'ok'
-        resolve(response && (response.ok === true || response.status === 'ok'));
-      });
-    } catch (e) {
-      resolve(false);
-    }
-  });
-}
-
-/**
- * Handle agentic mode keyboard shortcut
- */
 function handleAgenticMode() {
   document.addEventListener('keydown', async (e) => {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'A') {
@@ -1780,7 +1864,6 @@ function handleAgenticMode() {
 
       setTimeout(async () => {
         if (isSidebarOpen) return;
-
         showSidebar('AGENTIC');
         window.getSelection()?.removeAllRanges();
         await triggerAgenticAnalysis();
@@ -1788,7 +1871,6 @@ function handleAgenticMode() {
     }
   });
 
-  // Also listen for custom event (from background trigger)
   document.addEventListener('paperlens-trigger-agentic', async () => {
     if (isSidebarOpen) return;
     showSidebar('AGENTIC');
@@ -1796,9 +1878,8 @@ function handleAgenticMode() {
   });
 }
 
-/**
- * Initialize
- */
+// ─── Init ─────────────────────────────────────────────────────────────────────
+
 function initializeHandlers() {
   try {
     handleManualHighlight();

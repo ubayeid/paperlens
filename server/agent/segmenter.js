@@ -23,9 +23,10 @@ const SEGMENTER_PROMPT = `You are PaperLens Segmenter. Your job is to analyze te
    - Navigation/metadata/UI elements
    - References or citations only
    - Under 50 words (too short)
-6. Maximum 5-7 segments - be selective and focus on the most important visualizable content
-7. If the content is very short (<500 words), it may result in just 1-2 segments
-8. If the content is a single coherent topic, it may result in 1 segment
+6. Maximum 1-2 segments - be VERY selective and focus ONLY on the most important visualizable content
+7. For short content (<500 words), return ONLY 1 segment
+8. For longer content, prefer 1 comprehensive segment over multiple small ones
+9. Only create 2 segments if the content has TWO distinct, major concepts that cannot be combined
 
 **VISUALIZATION TYPES:**
 - process_flow: For methods, procedures, workflows, steps
@@ -88,10 +89,12 @@ CRITICAL INSTRUCTIONS:
 3. Extract the actual text for each segment from the input text above (preserve original wording exactly)
 4. Create intelligent, descriptive titles that capture the essence of each segment
 5. Focus on segments that would benefit from diagrams/visualizations
-6. Be selective - maximum 5-7 segments, only the most important ones
-7. If content is short or single-topic, return 1-2 segments
-8. Ensure each segment has 100-500 words of actual content
-9. **IMPORTANT**: Each segment's "text" field must contain ONLY text from the input above, nothing else`;
+6. Be VERY selective - maximum 1-2 segments, ONLY the most important ones
+7. For short content (<500 words), return ONLY 1 segment
+8. For longer content, prefer 1 comprehensive segment that captures the main concept
+9. Only create 2 segments if there are TWO completely distinct major concepts that cannot be combined
+10. Ensure each segment has 100-500 words of actual content
+11. **IMPORTANT**: Each segment's "text" field must contain ONLY text from the input above, nothing else`;
 
   try {
     const content = await generateChatCompletion(

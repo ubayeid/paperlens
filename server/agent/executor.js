@@ -68,6 +68,11 @@ async function execute(plan, paperData, onDiagram) {
     return;
   }
 
+  // Limit total visuals: For a whole paper, generate only 1-2 visuals total
+  // Prioritize the most important sections (priority 1, then priority 2)
+  const MAX_TOTAL_VISUALS = 2;
+  let totalVisualsGenerated = 0;
+
   // Separate by priority
   const priority1 = sectionsToProcess.filter(s => s.priority === 1);
   const priority2 = sectionsToProcess.filter(s => s.priority === 2);
@@ -108,6 +113,13 @@ async function execute(plan, paperData, onDiagram) {
     const retryDelay = (retryCount + 1) * 5; // 5s, 10s, 15s
 
     try {
+      // Early check: if we've already reached the limit, skip this section immediately
+      if (totalVisualsGenerated >= MAX_TOTAL_VISUALS) {
+        console.log(`[Executor] Skipping section "${planItem.heading}" - already reached limit of ${MAX_TOTAL_VISUALS} visuals`);
+        onDiagram(planItem.sectionId, null, planItem.heading || planItem.sectionId, `Skipped: Maximum of ${MAX_TOTAL_VISUALS} visuals reached.`);
+        return;
+      }
+
       const sectionData = findSectionData(planItem.sectionId, planItem);
       if (!sectionData) {
         console.error(`[Executor] Section ${planItem.sectionId} not found in paperData`);
@@ -152,8 +164,25 @@ async function execute(plan, paperData, onDiagram) {
       let segmentsRejected = 0;
       let segmentsSkipped = 0;
 
-      // Step 3: Generate visuals for each segment
-      for (const segment of segments) {
+      // Limit: Only generate visuals for the first 1-2 segments (most important ones)
+      // This ensures we don't generate too many visuals for a single section
+      const maxSegmentsPerSection = 2;
+      const segmentsToProcess = segments.slice(0, maxSegmentsPerSection);
+      
+      if (segments.length > maxSegmentsPerSection) {
+        console.log(`[Executor] Limiting to ${maxSegmentsPerSection} most important segments (out of ${segments.length} total)`);
+      }
+
+      // Step 3: Generate visuals for each segment (limited)
+      for (const segment of segmentsToProcess) {
+        // Check global limit: Stop if we've already generated enough visuals for the whole paper
+        if (totalVisualsGenerated >= MAX_TOTAL_VISUALS) {
+          console.log(`[Executor] Reached global limit of ${MAX_TOTAL_VISUALS} visuals. Skipping remaining segments in section "${planItem.heading}".`);
+          // If we generated at least one visual for this section, we're done
+          // If we generated none, the fallback will handle it
+          break;
+        }
+
         try {
           // Evaluate each segment individually as well
           const segmentEvaluation = await evaluateContent(segment.text, `Segment: ${segment.title}`);
@@ -170,6 +199,12 @@ async function execute(plan, paperData, onDiagram) {
             console.warn(`[Executor] Skipping segment "${segment.title}" - text too short`);
             segmentsSkipped++;
             continue;
+          }
+
+          // Final check before generating: if limit reached, skip this segment
+          if (totalVisualsGenerated >= MAX_TOTAL_VISUALS) {
+            console.log(`[Executor] Reached global limit of ${MAX_TOTAL_VISUALS} visuals. Skipping segment "${segment.title}".`);
+            break;
           }
 
           console.log(`[Executor] Creating visual for segment: "${segment.title}" (${segment.wordCount} words)`);
@@ -198,6 +233,7 @@ async function execute(plan, paperData, onDiagram) {
           const combinedId = `${planItem.sectionId}-${segment.id}`;
           onDiagram(combinedId, svg, segment.title, null);
           visualsGenerated++;
+          totalVisualsGenerated++;
         } catch (segmentError) {
           console.error(`[Executor] Error processing segment "${segment.title}":`, segmentError);
           // Continue with other segments even if one fails
@@ -209,7 +245,8 @@ async function execute(plan, paperData, onDiagram) {
       }
 
       // If no visuals were generated for any segment, try a single fallback visual for the whole section
-      if (visualsGenerated === 0) {
+      // BUT only if we haven't reached the global limit
+      if (visualsGenerated === 0 && totalVisualsGenerated < MAX_TOTAL_VISUALS) {
         const fallbackText = processed.text.length > 2000
           ? processed.text.substring(0, 2000)
           : processed.text;
@@ -228,6 +265,7 @@ async function execute(plan, paperData, onDiagram) {
               const svg = await downloadAndServeSVG(fileUrl);
               onDiagram(planItem.sectionId, svg, planItem.heading, null);
               visualsGenerated++;
+              totalVisualsGenerated++;
             } else {
               segmentsSkipped++;
             }
@@ -238,6 +276,8 @@ async function execute(plan, paperData, onDiagram) {
             }
           }
         }
+      } else if (visualsGenerated === 0 && totalVisualsGenerated >= MAX_TOTAL_VISUALS) {
+        console.log(`[Executor] Skipping fallback visual - reached global limit of ${MAX_TOTAL_VISUALS} visuals`);
       }
 
       // If still no visuals, surface an error so the UI doesn't stay in loading state
@@ -264,7 +304,16 @@ async function execute(plan, paperData, onDiagram) {
 
   // Process priority 1 sections in parallel (with concurrency limit)
   const priority1Promises = priority1.map(planItem =>
-    limiter.execute(() => processSectionVisual(planItem))
+    limiter.execute(() => {
+      // Check global limit before processing
+      if (totalVisualsGenerated >= MAX_TOTAL_VISUALS) {
+        console.log(`[Executor] Reached global limit of ${MAX_TOTAL_VISUALS} visuals. Skipping section "${planItem.heading}".`);
+        // Notify frontend that this section was skipped
+        onDiagram(planItem.sectionId, null, planItem.heading || planItem.sectionId, `Skipped: Maximum of ${MAX_TOTAL_VISUALS} visuals reached.`);
+        return Promise.resolve(null);
+      }
+      return processSectionVisual(planItem);
+    })
       .catch(error => {
         // Individual section failure - send error event
         console.error(`[Executor] Section ${planItem.sectionId} failed:`, error);
@@ -284,26 +333,40 @@ async function execute(plan, paperData, onDiagram) {
 
   await Promise.all(priority1Promises);
 
-  // Process priority 2 sections in parallel
-  const priority2Promises = priority2.map(planItem =>
-    limiter.execute(() => processSectionVisual(planItem))
-      .catch(error => {
-        console.error(`[Executor] Section ${planItem.sectionId} failed:`, error);
-        let errorMessage = error.message || 'Unknown error';
-        
-        // Better error messages for common cases
-        if (error instanceof RateLimitError) {
-          errorMessage = 'Rate limit exceeded. Please try again in a few moments.';
-        } else if (error.message.includes('timeout')) {
-          errorMessage = 'Visual generation timed out. Please try again.';
+  // Only process priority 2 sections if we haven't reached the limit
+  if (totalVisualsGenerated < MAX_TOTAL_VISUALS) {
+    // Process priority 2 sections in parallel
+    const priority2Promises = priority2.map(planItem =>
+      limiter.execute(() => {
+        // Check global limit before processing
+        if (totalVisualsGenerated >= MAX_TOTAL_VISUALS) {
+          console.log(`[Executor] Reached global limit of ${MAX_TOTAL_VISUALS} visuals. Skipping section "${planItem.heading}".`);
+          // Notify frontend that this section was skipped
+          onDiagram(planItem.sectionId, null, planItem.heading || planItem.sectionId, `Skipped: Maximum of ${MAX_TOTAL_VISUALS} visuals reached.`);
+          return Promise.resolve(null);
         }
-        
-        onDiagram(planItem.sectionId, null, planItem.heading || planItem.sectionId, errorMessage);
-        return null;
+        return processSectionVisual(planItem);
       })
-  );
+        .catch(error => {
+          console.error(`[Executor] Section ${planItem.sectionId} failed:`, error);
+          let errorMessage = error.message || 'Unknown error';
+          
+          // Better error messages for common cases
+          if (error instanceof RateLimitError) {
+            errorMessage = 'Rate limit exceeded. Please try again in a few moments.';
+          } else if (error.message.includes('timeout')) {
+            errorMessage = 'Visual generation timed out. Please try again.';
+          }
+          
+          onDiagram(planItem.sectionId, null, planItem.heading || planItem.sectionId, errorMessage);
+          return null;
+        })
+    );
 
-  await Promise.all(priority2Promises);
+    await Promise.all(priority2Promises);
+  } else {
+    console.log(`[Executor] Skipping priority 2 sections - already reached limit of ${MAX_TOTAL_VISUALS} visuals`);
+  }
 }
 
 module.exports = {
